@@ -41,6 +41,10 @@ function App() {
   const [status, setStatus] = useState({ kind: "idle", message: "" });
   const [detectionInfo, setDetectionInfo] = useState(null);
 
+  // Controls future behavior for adding the remaining slides.
+  // For this subtask it's a visible option only; date-only editing + last-slide invariants remain enforced.
+  const [addMode, setAddMode] = useState("dateOnly"); // dateOnly | skillFactory
+
   // Pipeline step visibility (to avoid blank preview and aid debugging)
   const [pipeline, setPipeline] = useState({
     step: "init", // init | fetch:loading | fetch:ok | fetch:error | edit:loading | edit:ok | edit:error | blob:ok
@@ -363,6 +367,9 @@ function App() {
                   ? `Updated_Template_${dateISO}.pptx`
                   : "Updated_Template.pptx"
               }
+              pptxBytes={generatedBytes}
+              addMode={addMode}
+              onSelectAddMode={setAddMode}
               debug={isDebugEnabled()}
               errorMessage={
                 status.kind === "error" && status.message ? status.message : ""

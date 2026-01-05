@@ -48,14 +48,14 @@ describe("PPTX preview regeneration", () => {
 
     render(<App />);
 
-    // The UI always provides a non-blank preview surface.
-    // Once the PPTX is generated, it must show the Download/Open link (reliable fallback).
+    // Wait until generation has produced a PPTX URL (the link is only rendered when `url` exists).
     const firstLink = await screen.findByRole("link", {
       name: "Download / Open PPTX",
     });
     const firstHref = firstLink.getAttribute("href");
     expect(firstHref).toBeTruthy();
 
+    // Changing date should create a new blob URL (new href).
     const dateInput = screen.getByLabelText("Slide 1 Date");
     fireEvent.change(dateInput, { target: { value: "2026-01-06" } });
 
