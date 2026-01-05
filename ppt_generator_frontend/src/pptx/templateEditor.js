@@ -4,9 +4,9 @@ import { saveAs } from "file-saver";
 /**
  * STRICT TEMPLATE RULES (user requirements):
  * - The app ships with a built-in PPTX: `public/assets/template.pptx`.
- * - Slide 1 has fixed template layout; we may update:
+ * - Slide 1 has fixed template layout; we may update ONLY:
  *    (a) the Slide 1 date text runs (editable), and
- *    (b) the existing Slide 1 Name VALUE text to "TATA ELXSI" (locked/fixed).
+ *    (b) the label directly above the Name on Slide 1 to "TATA ELXSI" (locked/fixed).
  * - Do NOT add new runs/paragraphs/shapes anywhere.
  * - Do NOT alter any other slides, and preserve the last slide byte-for-byte.
  *
@@ -14,14 +14,14 @@ import { saveAs } from "file-saver";
  * - Read `ppt/slides/slide1.xml` as a string (do not parse/re-serialize XML).
  * - Update only the inner text of existing <a:t> nodes:
  *    - 5 date runs (day/month/year splits)
- *    - the existing Name value runs (previously "Subrata B") inside the Name paragraph
+ *    - the existing label text-runs above Name (previously "TATA") updated in-place
  * - Do not modify any other file in the PPTX zip.
  *
  * IMPORTANT:
- * The "only date editable" constraint is preserved in the UI. The Name value is
- * forcibly set to a fixed string on generation to match the template requirement,
- * but we still keep the mutation extremely narrow: only specific existing <a:t>
- * nodes are changed, and no new XML nodes are introduced.
+ * The "only date editable" constraint is preserved in the UI. The label update is
+ * forced on generation to match the template requirement, but the mutation remains
+ * extremely narrow: only specific existing <a:t> nodes are changed, and no new XML
+ * nodes are introduced.
  */
 
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
@@ -170,32 +170,35 @@ function getFirstATextNodeFromRun(runXml) {
 }
 
 /**
- * Replaces the Slide 1 "Name" value runs in-place.
+ * Replaces the Slide 1 label directly above the Name (in-place).
  *
  * Template structure (bundled template):
- * Name paragraph contains runs: "Name", " ", ":", " ", "Subrata", " ", "B"
+ * - There is a single paragraph with a single <a:r> whose <a:t> is "TATA"
+ *   (shown above the "Name : Subrata B" line in the screenshot).
  *
  * Requirements:
- * - Do not add runs/paragraphs/shapes.
- * - Replace the existing value text content directly.
- * - Keep the label "Name :" unchanged (no new label above it).
+ * - Replace only existing <a:t> inner text (no new runs/paragraphs/shapes).
+ * - Copy style/spacing from template: by editing text only, we preserve font,
+ *   weight, size, color, alignment, and positioning.
  *
  * Returns:
- * - updatedShapeXml: shape.xml with updated paragraph content
- * - allowedATextNodePairs: [{ originalNode, updatedNode }, ...] for safety guard
+ * - updatedShapeXml
+ * - allowedATextNodePairs for safety guard
  */
-function replaceSlide1NameValueInShape(shapeXml, targetValue) {
+function replaceSlide1LabelAboveNameInShape(shapeXml, targetValue) {
   const { scopeXml, scopeOffset, paragraphs } = collectParagraphsFromShape(shapeXml);
   if (!paragraphs.length) {
-    throw new Error("Strict template mismatch: name shape contains no paragraphs.");
+    throw new Error("Strict template mismatch: label shape contains no paragraphs.");
   }
 
-  const paragraphIndex = paragraphs.findIndex(
-    (p) => p.xml.includes("Name</a:t>") && p.xml.includes("<a:t>Subrata</a:t>")
+  // Strictly find the paragraph that contains exactly the "TATA" <a:t>.
+  // We keep this conservative to avoid accidentally touching other text nodes.
+  const paragraphIndex = paragraphs.findIndex((p) =>
+    p.xml.includes("<a:t>TATA</a:t>")
   );
   if (paragraphIndex < 0) {
     throw new Error(
-      'Strict template mismatch: could not find the expected "Name" paragraph with the original value in slide 1.'
+      'Strict template mismatch: could not find the expected "TATA" label paragraph in slide 1.'
     );
   }
 
@@ -206,51 +209,42 @@ function replaceSlide1NameValueInShape(shapeXml, targetValue) {
     hasText: /<a:t\b/.test(runXml),
   }));
 
-  const expectedRunTexts = ["Name", " ", ":", " ", "Subrata", " ", "B"];
-  const actualRunTexts = runs.map((r) => (r.hasText ? r.tText : null));
-  const matches =
-    actualRunTexts.length === expectedRunTexts.length &&
-    actualRunTexts.every((v, i) => v === expectedRunTexts[i]);
+  // Expect exactly one run with a:t="TATA" for this label paragraph.
+  const textRuns = runs.filter((r) => r.hasText);
+  const isStrictLabel =
+    textRuns.length === 1 && textRuns[0].tText === "TATA" && runs.length >= 1;
 
-  if (!matches) {
+  if (!isStrictLabel) {
     throw new Error(
-      "Strict template mismatch: Name paragraph runs differ from expected template; refusing to modify."
+      'Strict template mismatch: label paragraph runs differ from expected template; refusing to modify.'
     );
   }
 
-  // We must not add runs. Encode the full target value into the existing "Subrata" run
-  // and blank out the trailing "B" run to avoid leftover characters.
   const updatedRunsXml = runs.map((r) => r.xml);
-
-  const originalNodeSubrata = getFirstATextNodeFromRun(updatedRunsXml[4]);
-  const originalNodeB = getFirstATextNodeFromRun(updatedRunsXml[6]);
-  if (!originalNodeSubrata || !originalNodeB) {
+  const originalNode = getFirstATextNodeFromRun(textRuns[0].xml);
+  if (!originalNode) {
     throw new Error(
-      "Strict template mismatch: could not locate <a:t> nodes for Name value runs."
+      "Strict template mismatch: could not locate <a:t> node for label run."
     );
   }
 
   const newValueEscaped = escapeXmlText(targetValue);
-  const updatedNodeSubrata = originalNodeSubrata.replace(
+  const updatedNode = originalNode.replace(
     /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
     `$1${newValueEscaped}$3`
   );
-  const updatedNodeB = originalNodeB.replace(
-    /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
-    `$1$3`
-  );
 
-  updatedRunsXml[4] = updatedRunsXml[4].replace(
-    originalNodeSubrata,
-    updatedNodeSubrata
-  );
-  updatedRunsXml[6] = updatedRunsXml[6].replace(originalNodeB, updatedNodeB);
+  // Replace within the matching run.
+  const runIdx = runs.findIndex((r) => r.xml === textRuns[0].xml);
+  updatedRunsXml[runIdx] = updatedRunsXml[runIdx].replace(originalNode, updatedNode);
 
   // Rebuild paragraph preserving exact non-run content around the run region.
   const firstRunIdx = paragraphXml.search(/<a:r\b/);
   const lastRunEnd = paragraphXml.lastIndexOf("</a:r>");
   if (firstRunIdx < 0 || lastRunEnd < 0) {
-    throw new Error("Strict template mismatch: could not parse Name paragraph runs.");
+    throw new Error(
+      "Strict template mismatch: could not parse label paragraph runs."
+    );
   }
   const runRegionEnd = lastRunEnd + "</a:r>".length;
   const pHead = paragraphXml.slice(0, firstRunIdx);
@@ -272,17 +266,14 @@ function replaceSlide1NameValueInShape(shapeXml, targetValue) {
 
   return {
     updatedShapeXml,
-    allowedATextNodePairs: [
-      { originalNode: originalNodeSubrata, updatedNode: updatedNodeSubrata },
-      { originalNode: originalNodeB, updatedNode: updatedNodeB },
-    ],
+    allowedATextNodePairs: [{ originalNode, updatedNode }],
   };
 }
 
 /**
  * Verifies that differences between originalSlide1Xml and updatedSlide1Xml
  * occur ONLY within the inner text of the intended date <a:t> nodes on slide 1
- * plus any explicitly allowed additional <a:t> node replacements (e.g., fixed Name value).
+ * plus any explicitly allowed additional <a:t> node replacements.
  *
  * This avoids brittle positional diffs (day can change 2 digits -> 1 digit, shifting
  * subsequent characters and causing false positives).
@@ -364,7 +355,7 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
     allowedGlobalIndexes.add(q.shift());
   }
 
-  // Allow: additional <a:t> nodes explicitly expected to change.
+  // Allow: additional <a:t> nodes explicitly expected to change (label above Name).
   for (const pair of allowedAdditionalATextNodePairs) {
     const q = queues.get(pair.originalNode) ?? [];
     if (!q.length) {
@@ -387,7 +378,7 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
     if (allowedGlobalIndexes.has(i)) continue;
     if (origNodes[i] !== nextNodes[i]) {
       throw new Error(
-        "Safety check failed: slide1.xml modified in a non-date/non-allowed <a:t> node. Only date is editable; Name is fixed to a constant."
+        "Safety check failed: slide1.xml modified in a non-date/non-allowed <a:t> node. Only date is editable; label above Name is fixed to a constant."
       );
     }
   }
@@ -396,12 +387,12 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
 /**
  * PUBLIC_INTERFACE
  * Updates ONLY the date field on slide 1 for the shipped default template,
- * and also forces the existing Slide 1 Name value to "TATA ELXSI" (in-place).
+ * and also forces the label above Name to "TATA ELXSI" (in-place).
  *
  * Guarantees:
  * - slide1.xml is identical except for:
  *   - the targeted date <a:t> nodes, and
- *   - the existing Name value <a:t> nodes ("Subrata" and "B") updated in-place.
+ *   - the label-above-Name <a:t> node updated in-place ("TATA" -> "TATA ELXSI").
  * - Does not alter any <a:rPr>, paragraph properties, shape geometry, or layout.
  * - Does not change any other files; last slide stays byte-identical.
  *
@@ -426,31 +417,29 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const slide1XmlOriginal = await slide1File.async("string");
 
   // Slide 1 edits operate only on slide1.xml.
-  // 1) Fix Name value to "TATA ELXSI" in-place (no new runs/paragraphs/shapes).
+  // 1) Fix label above Name to "TATA ELXSI" in-place (no new runs/paragraphs/shapes).
   const shapes = collectShapeBlocks(slide1XmlOriginal);
-  const nameCandidates = shapes.filter(
-    (s) => s.xml.includes("Name</a:t>") && s.xml.includes("<a:t>Subrata</a:t>")
-  );
-  if (nameCandidates.length !== 1) {
+  const labelCandidates = shapes.filter((s) => s.xml.includes("<a:t>TATA</a:t>"));
+  if (labelCandidates.length !== 1) {
     throw new Error(
-      'Strict template mismatch: could not uniquely locate the Slide 1 Name field/value shape.'
+      'Strict template mismatch: could not uniquely locate the Slide 1 label above Name (expected a single "TATA" label node).'
     );
   }
 
-  const nameShape = nameCandidates[0];
+  const labelShape = labelCandidates[0];
   const {
-    updatedShapeXml: updatedNameShapeXml,
-    allowedATextNodePairs: allowedNameATextNodePairs,
-  } = replaceSlide1NameValueInShape(nameShape.xml, "TATA ELXSI");
+    updatedShapeXml: updatedLabelShapeXml,
+    allowedATextNodePairs: allowedLabelATextNodePairs,
+  } = replaceSlide1LabelAboveNameInShape(labelShape.xml, "TATA ELXSI");
 
-  const slide1XmlAfterName =
-    slide1XmlOriginal.slice(0, nameShape.start) +
-    updatedNameShapeXml +
-    slide1XmlOriginal.slice(nameShape.end);
+  const slide1XmlAfterLabel =
+    slide1XmlOriginal.slice(0, labelShape.start) +
+    updatedLabelShapeXml +
+    slide1XmlOriginal.slice(labelShape.end);
 
   // 2) Update Date runs (editable) in-place.
-  const shapesAfterName = collectShapeBlocks(slide1XmlAfterName);
-  const dateLabelCandidates = shapesAfterName.filter((s) =>
+  const shapesAfterLabel = collectShapeBlocks(slide1XmlAfterLabel);
+  const dateLabelCandidates = shapesAfterLabel.filter((s) =>
     s.xml.includes("Date</a:t>")
   );
 
@@ -497,7 +486,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   }
 
   if (!shape) {
-    const names = shapesAfterName
+    const names = shapesAfterLabel
       .map((s) => getShapeName(s.xml))
       .filter(Boolean)
       .slice(0, 15)
@@ -531,8 +520,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
 
   const actualRunTexts = runs.map((r) => (r.hasText ? r.tText : null));
   const sameLength = actualRunTexts.length === expectedRunTexts.length;
-  const matches =
-    sameLength && actualRunTexts.every((v, i) => v === expectedRunTexts[i]);
+  const matches = sameLength && actualRunTexts.every((v, i) => v === expectedRunTexts[i]);
 
   if (!matches) {
     throw new Error(
@@ -546,9 +534,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const yTail = y.slice(3);
 
   // Use real NBSP characters to preserve spacing semantics.
-  const replacements = [`\u00a0 ${day}\u00a0`, mon, " ", yHead, yTail].map(
-    escapeXmlText
-  );
+  const replacements = [`\u00a0 ${day}\u00a0`, mon, " ", yHead, yTail].map(escapeXmlText);
 
   const dateRunIndexes = [3, 4, 5, 6, 7];
   const updatedRunsXml = runs.map((r) => r.xml);
@@ -587,18 +573,18 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     shape.xml.slice(scopeOffset + scopeXml.length);
 
   const updatedSlide1Xml =
-    slide1XmlAfterName.slice(0, shape.start) +
+    slide1XmlAfterLabel.slice(0, shape.start) +
     updatedShapeXml +
-    slide1XmlAfterName.slice(shape.end);
+    slide1XmlAfterLabel.slice(shape.end);
 
-  // Guard: allow only the 5 intended date <a:t> nodes AND the two Name-value nodes.
+  // Guard: allow only the 5 intended date <a:t> nodes AND the label node.
   // Everything else in slide1.xml must remain byte-for-byte identical (structure preserved).
   verifyOnlyAllowedSlide1DiffsByATextNodes({
     originalSlide1Xml: slide1XmlOriginal,
     updatedSlide1Xml,
     dateParagraphXmlOriginal: paragraphXml,
     allowedDateRunIndexes: dateRunIndexes,
-    allowedAdditionalATextNodePairs: allowedNameATextNodePairs,
+    allowedAdditionalATextNodePairs: allowedLabelATextNodePairs,
   });
 
   zip.file(SLIDE1_PATH, updatedSlide1Xml);
@@ -608,7 +594,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   return {
     updatedPptxBytes: out,
     detected: {
-      mode: "strict-template/date-only + fixed-name-node-guard",
+      mode: "strict-template/date-only + fixed-label-above-name-node-guard",
       slidePath: SLIDE1_PATH,
       shapeName,
       shapeId,
@@ -662,10 +648,7 @@ export function todayIsoDate() {
  * @param {Uint8Array} updatedPptxBytes
  * @returns {Promise<boolean>} true if unchanged, else throws Error
  */
-export async function assertLastSlideUnchanged(
-  originalPptxArrayBuffer,
-  updatedPptxBytes
-) {
+export async function assertLastSlideUnchanged(originalPptxArrayBuffer, updatedPptxBytes) {
   /** This is a public function. */
   const originalZip = await JSZip.loadAsync(originalPptxArrayBuffer);
   const updatedZip = await JSZip.loadAsync(updatedPptxBytes);
@@ -681,9 +664,7 @@ export async function assertLastSlideUnchanged(
     });
 
   if (!slidePaths.length) {
-    throw new Error(
-      "Invariant check failed: original PPTX contains no slide XML parts."
-    );
+    throw new Error("Invariant check failed: original PPTX contains no slide XML parts.");
   }
 
   const LAST_SLIDE_PATH = slidePaths[slidePaths.length - 1];
@@ -693,7 +674,9 @@ export async function assertLastSlideUnchanged(
 
   if (!orig || !next) {
     throw new Error(
-      `Invariant check failed: missing ${LAST_SLIDE_PATH} in ${!orig ? "original" : "updated"} PPTX.`
+      `Invariant check failed: missing ${LAST_SLIDE_PATH} in ${
+        !orig ? "original" : "updated"
+      } PPTX.`
     );
   }
 
@@ -708,9 +691,7 @@ export async function assertLastSlideUnchanged(
 
   for (let i = 0; i < origBytes.length; i += 1) {
     if (origBytes[i] !== nextBytes[i]) {
-      throw new Error(
-        `Invariant check failed: last slide bytes differ at offset ${i}.`
-      );
+      throw new Error(`Invariant check failed: last slide bytes differ at offset ${i}.`);
     }
   }
 
