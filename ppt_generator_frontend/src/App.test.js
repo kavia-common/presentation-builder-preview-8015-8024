@@ -28,7 +28,8 @@ async function makeMinimalPptxArrayBuffer() {
       "<a:r><a:t>Date</a:t></a:r>",
       "<a:r><a:t> </a:t></a:r>",
       "<a:r><a:t>:</a:t></a:r>",
-      "<a:r><a:t>\\u00a0 24\\u00a0</a:t></a:r>",
+      // IMPORTANT: Use real NBSP characters to match strict template expectations in templateEditor.js
+      "<a:r><a:t>\u00a0 24\u00a0</a:t></a:r>",
       "<a:r><a:t>Dec</a:t></a:r>",
       "<a:r><a:t> </a:t></a:r>",
       "<a:r><a:t>202</a:t></a:r>",

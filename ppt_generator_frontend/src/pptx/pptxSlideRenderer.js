@@ -1031,7 +1031,15 @@ async function renderNodeList({
 
 /**
  * PUBLIC_INTERFACE
- * Returns slide indices present in the PPTX (sorted).
+ * Returns slide indices in *deck order* as defined by ppt/presentation.xml.
+ *
+ * Why this matters:
+ * - Our default-deck pruning keeps intermediate slide parts in the ZIP but removes them
+ *   from the deck order (<p:sldIdLst>) for byte-preservation safety.
+ * - The preview must reflect the actual deck order, not "all slideN.xml files that exist".
+ *
+ * Fallback behavior:
+ * - If presentation.xml is missing or cannot be parsed, we fall back to scanning slide parts.
  *
  * @param {Uint8Array} pptxBytes
  * @returns {Promise<number[]>}
@@ -1039,12 +1047,61 @@ async function renderNodeList({
 export async function listSlideIndexes(pptxBytes) {
   /** This is a public function. */
   const zip = await JSZip.loadAsync(pptxBytes);
+
+  // Preferred: deck order from presentation.xml + presentation.xml.rels.
+  try {
+    const presFile = zip.file("ppt/presentation.xml");
+    const relsFile = zip.file("ppt/_rels/presentation.xml.rels");
+    if (presFile && relsFile) {
+      const [presXml, relsXml] = await Promise.all([
+        presFile.async("string"),
+        relsFile.async("string"),
+      ]);
+
+      // Map rId -> slideN.xml (Target="slides/slideN.xml")
+      const relRe =
+        /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bType="http:\/\/schemas\.openxmlformats\.org\/officeDocument\/2006\/relationships\/slide"[^>]*\bTarget="([^"]+)"[^>]*\/>/g;
+      const ridToSlideNumber = new Map();
+      let m;
+      while ((m = relRe.exec(relsXml)) !== null) {
+        const rid = m[1];
+        const target = m[2] || "";
+        const sm = target.match(/slides\/slide(\d+)\.xml$/);
+        const n = Number(sm?.[1] ?? 0);
+        if (rid && Number.isFinite(n) && n > 0) {
+          ridToSlideNumber.set(rid, n);
+        }
+      }
+
+      // Extract <p:sldId ... r:id="rIdX"/> in order.
+      const sldIdLstMatch = presXml.match(
+        /<p:sldIdLst\b[\s\S]*?<\/p:sldIdLst>/
+      );
+      if (sldIdLstMatch) {
+        const lst = sldIdLstMatch[0];
+        const sldIdRe = /<p:sldId\b[^>]*\br:id="([^"]+)"[^>]*\/>/g;
+        const ordered = [];
+        let sm;
+        while ((sm = sldIdRe.exec(lst)) !== null) {
+          const rid = sm[1];
+          const slideNum = ridToSlideNumber.get(rid);
+          if (slideNum) ordered.push(slideNum);
+        }
+
+        // Only accept the deck-order result if we found at least one slide.
+        if (ordered.length) return ordered;
+      }
+    }
+  } catch (e) {
+    // Fall through to the legacy behavior below.
+  }
+
+  // Legacy fallback: all slide parts present in the ZIP (sorted).
   const slidePaths = zip.file(/^ppt\/slides\/slide\d+\.xml$/).map((f) => f.name);
-  const indexes = slidePaths
+  return slidePaths
     .map((p) => Number(p.match(/slide(\d+)\.xml$/)?.[1] ?? 0))
     .filter((n) => Number.isFinite(n) && n > 0)
     .sort((a, b) => a - b);
-  return indexes;
 }
 
 /**
