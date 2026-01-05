@@ -293,6 +293,30 @@
   flex-wrap: wrap;
 }
 
+.carousel-counter {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 4px;
+  min-width: 72px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: rgba(17, 24, 39, 0.04);
+  color: var(--ocean-text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.carousel-counter-sep {
+  color: var(--ocean-muted);
+  font-weight: 800;
+}
+
+[data-theme="dark"] .carousel-counter {
+  background: rgba(243, 244, 246, 0.08);
+}
+
 .carousel-indicator {
   display: inline-flex;
   align-items: center;

@@ -93,6 +93,19 @@ export default function PptxPreview({
     };
   }, [pptxBytes]);
 
+  // Clamp the current carousel index when slide count changes.
+  // This keeps the UI in sync after Skill Factory insertions/pruning and prevents
+  // out-of-range indexes from showing incorrect counters or rendering attempts.
+  useEffect(() => {
+    if (!slideIndexes.length) {
+      if (currentIdx !== 0) setCurrentIdx(0);
+      return;
+    }
+
+    const maxIdx = Math.max(0, slideIndexes.length - 1);
+    if (currentIdx > maxIdx) setCurrentIdx(maxIdx);
+  }, [slideIndexes, currentIdx]);
+
   // Render the currently selected slide.
   useEffect(() => {
     let cancelled = false;
@@ -104,7 +117,8 @@ export default function PptxPreview({
       if (!pptxBytes || !pptxBytes.length) return;
       if (!slideIndexes.length) return;
 
-      const slideIndex = slideIndexes[Math.min(currentIdx, slideIndexes.length - 1)];
+      const slideIndex =
+        slideIndexes[Math.min(currentIdx, slideIndexes.length - 1)];
       try {
         const result = await renderSlideToSvgDataUrl(pptxBytes, slideIndex, {
           widthPx: 1040,
@@ -127,8 +141,14 @@ export default function PptxPreview({
   const effectiveUrl = url || localUrl;
   const showError = Boolean((!effectiveUrl && errorMessage) || renderError);
   const canNavigate = slideIndexes.length > 1;
-  const currentSlideNumber = slideIndexes.length
-    ? slideIndexes[Math.min(currentIdx, slideIndexes.length - 1)]
+
+  // Carousel position (1-based) and total count for the requested X/Y counter.
+  const totalSlides = slideIndexes.length;
+  const currentSlidePos = totalSlides ? Math.min(currentIdx, totalSlides - 1) + 1 : 0;
+
+  // Actual PPT slide number (e.g., slide part index in the PPTX) for labels/badges.
+  const currentSlideNumber = totalSlides
+    ? slideIndexes[Math.min(currentIdx, totalSlides - 1)]
     : 0;
 
   if (!pptxBytes || !pptxBytes.length) {
@@ -264,16 +284,10 @@ export default function PptxPreview({
             Prev
           </button>
 
-          <div className="carousel-indicator" aria-label="Slide indicator">
-            Slide <strong>{slideIndexes.length ? currentSlideNumber : "—"}</strong>{" "}
-            / <strong>{slideIndexes.length || "—"}</strong>
-            {currentSlideNumber === 1 ? (
-              <span className="carousel-badge editable">date editable</span>
-            ) : currentSlideNumber === slideIndexes[slideIndexes.length - 1] ? (
-              <span className="carousel-badge locked">locked (last)</span>
-            ) : (
-              <span className="carousel-badge locked">locked</span>
-            )}
+          <div className="carousel-counter" aria-label="Slide counter">
+            <strong>{totalSlides ? currentSlidePos : "—"}</strong>
+            <span className="carousel-counter-sep">/</span>
+            <strong>{totalSlides || "—"}</strong>
           </div>
 
           <button
@@ -286,6 +300,18 @@ export default function PptxPreview({
           >
             Next
           </button>
+
+          <div className="carousel-indicator" aria-label="Slide indicator">
+            Slide <strong>{totalSlides ? currentSlideNumber : "—"}</strong> /{" "}
+            <strong>{totalSlides || "—"}</strong>
+            {currentSlideNumber === 1 ? (
+              <span className="carousel-badge editable">date editable</span>
+            ) : currentSlideNumber === slideIndexes[slideIndexes.length - 1] ? (
+              <span className="carousel-badge locked">locked (last)</span>
+            ) : (
+              <span className="carousel-badge locked">locked</span>
+            )}
+          </div>
         </div>
 
         <div className="carousel-stage" aria-label="Slide preview stage">
