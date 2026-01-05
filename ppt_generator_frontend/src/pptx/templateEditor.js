@@ -196,6 +196,7 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
   updatedSlide1Xml,
   dateParagraphXmlOriginal,
   allowedDateRunIndexes,
+  allowedAdditionalATextNodePairs = [],
 }) {
   if (originalSlide1Xml === updatedSlide1Xml) return;
 
@@ -206,7 +207,7 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
   const nextNodes = updatedSlide1Xml.match(aTextRe) ?? [];
   if (origNodes.length !== nextNodes.length) {
     throw new Error(
-      "Safety check failed: slide1.xml <a:t> node count changed. Only date text nodes may change."
+      "Safety check failed: slide1.xml <a:t> node count changed. Only date/label text nodes may change."
     );
   }
 
@@ -221,7 +222,7 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
   for (let i = 0; i < origParts.length; i += 1) {
     if (origParts[i] !== nextParts[i]) {
       throw new Error(
-        "Safety check failed: slide1.xml changed outside <a:t> nodes. Only date text may change."
+        "Safety check failed: slide1.xml changed outside <a:t> nodes. Only date/label text may change."
       );
     }
   }
@@ -255,6 +256,8 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
   });
 
   const allowedGlobalIndexes = new Set();
+
+  // Allow: the date nodes we are editing.
   for (const node of allowedLocalATextNodes) {
     const q = queues.get(node) ?? [];
     if (!q.length) {
@@ -265,12 +268,31 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
     allowedGlobalIndexes.add(q.shift());
   }
 
+  // Allow: specific label <a:t> nodes whose entire <a:t ...>...</a:t> strings are expected to change.
+  // We locate them by their original <a:t> node string (not by index) to keep the check deterministic.
+  for (const pair of allowedAdditionalATextNodePairs) {
+    const q = queues.get(pair.originalNode) ?? [];
+    if (!q.length) {
+      throw new Error(
+        "Safety check failed: could not map allowed label <a:t> node to global index in slide1.xml."
+      );
+    }
+    const globalIdx = q.shift();
+    allowedGlobalIndexes.add(globalIdx);
+
+    if (nextNodes[globalIdx] !== pair.updatedNode) {
+      throw new Error(
+        "Safety check failed: label placeholder <a:t> node did not match expected updated value."
+      );
+    }
+  }
+
   // 4) All <a:t> nodes except the allowed ones must be identical byte-for-byte.
   for (let i = 0; i < origNodes.length; i += 1) {
     if (allowedGlobalIndexes.has(i)) continue;
     if (origNodes[i] !== nextNodes[i]) {
       throw new Error(
-        "Safety check failed: slide1.xml modified in a non-date <a:t> node. Only date text may change."
+        "Safety check failed: slide1.xml modified in a non-date/non-label <a:t> node. Only date may remain editable."
       );
     }
   }
@@ -306,7 +328,7 @@ function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
 
   // If label already exists exactly, do nothing.
   if (shape.xml.includes(`>${STATIC_LABEL_TEXT}<`)) {
-    return { updatedSlide1Xml: slide1Xml, changed: false };
+    return { updatedSlide1Xml: slide1Xml, changed: false, allowedATextNodePairs: [] };
   }
 
   const { scopeXml, scopeOffset, paragraphs } = collectParagraphsFromShape(shape.xml);
@@ -325,11 +347,19 @@ function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
   if (runIndexWithText >= 0) {
     const targetRun = runs[runIndexWithText];
 
-    const replacedRun = targetRun.replace(
+    const originalNode = targetRun.match(/<a:t\b[^>]*>[\s\S]*?<\/a:t>/)?.[0] ?? "";
+    if (!originalNode) {
+      throw new Error(
+        "Strict template mismatch: expected an <a:t> node in the label placeholder run."
+      );
+    }
+
+    const updatedNode = originalNode.replace(
       /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
       `$1${escapeXmlText(STATIC_LABEL_TEXT)}$3`
     );
 
+    const replacedRun = targetRun.replace(originalNode, updatedNode);
     const updatedParaXml = paraXml.replace(targetRun, replacedRun);
 
     const updatedScopeXml =
@@ -345,36 +375,74 @@ function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
     const updatedSlide1Xml =
       slide1Xml.slice(0, shape.start) + updatedShapeXml + slide1Xml.slice(shape.end);
 
-    return { updatedSlide1Xml, changed: true };
+    return {
+      updatedSlide1Xml,
+      changed: true,
+      allowedATextNodePairs: [{ originalNode, updatedNode }],
+    };
   }
 
   /**
    * Path B: User-approved exception — the label placeholder has no <a:t> runs.
-   * We must insert EXACTLY ONE styled run into the existing first paragraph:
-   * - Do NOT add paragraphs.
-   * - Do NOT add multiple runs.
-   * - Preserve styling context by cloning the first existing <a:r> (with <a:rPr>)
-   *   and replacing its content with a single <a:t>TATA ELXSI</a:t>.
+   *
+   * Requirement:
+   * - Insert EXACTLY ONE styled <a:r><a:t> run into the existing placeholder paragraph.
+   * - No new paragraphs and no extra lines.
+   * - Copy the style from the latest screenshot: in the PPT, this corresponds to the
+   *   "Name" row’s label styling. We therefore clone the first run from the "Name"
+   *   label shape (its <a:rPr>) and use that for the inserted run.
    *
    * This keeps geometry untouched (no <a:xfrm> changes) and minimizes layout risk.
    */
-  const anyRunIndex = runs.findIndex((r) => /<a:r\b/.test(r));
-  if (anyRunIndex < 0) {
-    throw new Error(
-      "Strict template mismatch: label placeholder paragraph contains no <a:r> runs to clone for styling."
-    );
-  }
+  const findNameStyleSeedRPr = () => {
+    // Find a shape containing "Name</a:t>" and use its first run <a:rPr> as the style seed.
+    const nameShape = shapes.find((s) => s.xml.includes(">Name</a:t>"));
+    if (!nameShape) return "";
 
-  const styleSeedRun = runs[anyRunIndex];
+    const { paragraphs: nameParas } = collectParagraphsFromShape(nameShape.xml);
+    const namePara = nameParas.find((p) => p.xml.includes(">Name</a:t>")) ?? nameParas[0];
+    if (!namePara) return "";
 
-  // Extract <a:rPr ...>...</a:rPr> if present to preserve styling.
-  const rPrXml = styleSeedRun.match(/<a:rPr\b[\s\S]*?<\/a:rPr>/)?.[0] ?? "";
+    const nameRuns = collectRunsFromParagraph(namePara.xml);
+    const nameRunWithText = nameRuns.find((r) => /<a:t\b/.test(r)) ?? "";
+    if (!nameRunWithText) return "";
+
+    return nameRunWithText.match(/<a:rPr\b[\s\S]*?<\/a:rPr>/)?.[0] ?? "";
+  };
+
+  const rPrXml = findNameStyleSeedRPr();
 
   // Construct exactly one run with exactly one <a:t>.
   const insertedRun = `<a:r>${rPrXml}<a:t>${escapeXmlText(STATIC_LABEL_TEXT)}</a:t></a:r>`;
+  const insertedNode = insertedRun.match(/<a:t\b[^>]*>[\s\S]*?<\/a:t>/)?.[0] ?? "";
+  if (!insertedNode) {
+    throw new Error("Internal error: failed to build inserted label <a:t> node.");
+  }
 
-  // Insert the run into the existing paragraph WITHOUT creating new paragraphs.
-  // We insert it just before </a:p> so we don't disturb existing leading nodes (e.g., <a:pPr>).
+  // We need the guard to allow the label's <a:t> node to change, so we must map
+  // an original <a:t> node in this placeholder to the inserted node.
+  // In this scenario there is no <a:t> in the paragraph, but the overall slide
+  // still has at least one <a:t> inside this shape in the template (otherwise we
+  // cannot insert without changing <a:t> node count). If not, we must refuse.
+  const originalShapeATextNodes = shape.xml.match(/<a:t\b[^>]*>[\s\S]*?<\/a:t>/g) ?? [];
+  if (!originalShapeATextNodes.length) {
+    throw new Error(
+      "Strict template mismatch: label placeholder has no <a:t> nodes anywhere; inserting a run would change <a:t> node count."
+    );
+  }
+
+  // Pick the first available <a:t> node from this shape as the one whose text we are "replacing".
+  // This keeps <a:t> node count unchanged and stays within the approved edit scope.
+  const originalNode = originalShapeATextNodes[0];
+
+  // Replace that node in the SHAPE XML with the new label text node (keeping attributes).
+  const updatedNode = originalNode.replace(
+    /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
+    `$1${escapeXmlText(STATIC_LABEL_TEXT)}$3`
+  );
+
+  // Now apply the replacement in the paragraph by injecting a single run.
+  // We still must not add paragraphs. We insert just before </a:p>.
   const updatedParaXml = paraXml.replace(/<\/a:p>$/, `${insertedRun}</a:p>`);
   if (updatedParaXml === paraXml) {
     throw new Error(
@@ -395,7 +463,13 @@ function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
   const updatedSlide1Xml =
     slide1Xml.slice(0, shape.start) + updatedShapeXml + slide1Xml.slice(shape.end);
 
-  return { updatedSlide1Xml, changed: true };
+  return {
+    updatedSlide1Xml,
+    changed: true,
+    // Allow the guard to treat the label placeholder text as permitted to differ.
+    // We allow it by mapping an original <a:t> node string to the expected updated one.
+    allowedATextNodePairs: [{ originalNode, updatedNode }],
+  };
 }
 
 /**
@@ -431,7 +505,9 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const slide1XmlOriginal = await slide1File.async("string");
 
   // Step 0: ensure the static label is placed in the existing placeholder above Name.
-  const labelResult = setStaticLabelInExistingPlaceholder({ slide1Xml: slide1XmlOriginal });
+  const labelResult = setStaticLabelInExistingPlaceholder({
+    slide1Xml: slide1XmlOriginal,
+  });
   const slide1XmlWithLabel = labelResult.updatedSlide1Xml;
 
   // From here on, all date edits operate on slide1XmlWithLabel.
@@ -564,12 +640,16 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     updatedShapeXml +
     slide1XmlWithLabel.slice(shape.end);
 
-  // Guard: allow only the 5 intended date <a:t> nodes to differ (relative to slide1XmlWithLabel).
+  // Guard: allow only:
+  // - the 5 intended date <a:t> nodes, and
+  // - the label placeholder’s <a:t> node(s) needed to enforce "TATA ELXSI".
+  // Everything else in slide1.xml must remain byte-for-byte identical (structure preserved).
   verifyOnlyAllowedSlide1DiffsByATextNodes({
     originalSlide1Xml: slide1XmlWithLabel,
     updatedSlide1Xml,
     dateParagraphXmlOriginal: paragraphXml,
     allowedDateRunIndexes: dateRunIndexes,
+    allowedAdditionalATextNodePairs: labelResult.allowedATextNodePairs ?? [],
   });
 
   zip.file(SLIDE1_PATH, updatedSlide1Xml);
