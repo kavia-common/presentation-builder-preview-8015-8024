@@ -12,7 +12,9 @@ jest.setTimeout(20000);
 async function makeMinimalPptxArrayBuffer() {
   // Minimal PPTX-like zip with slide1.xml containing the expected strict date runs.
   // Also include a "last slide" with the highest slide number so we can assert it remains untouched.
-  // Our invariant checker detects the last slide dynamically (highest slideN.xml).
+  //
+  // NOTE: The app now prunes the deck to only Slide 1 + last slide by editing
+  // ppt/presentation.xml and ppt/_rels/presentation.xml.rels, so those parts must exist.
   const zip = new JSZip();
 
   zip.file(
@@ -26,7 +28,7 @@ async function makeMinimalPptxArrayBuffer() {
       "<a:r><a:t>Date</a:t></a:r>",
       "<a:r><a:t> </a:t></a:r>",
       "<a:r><a:t>:</a:t></a:r>",
-      "<a:r><a:t>\u00a0 24\u00a0</a:t></a:r>",
+      "<a:r><a:t>\\u00a0 24\\u00a0</a:t></a:r>",
       "<a:r><a:t>Dec</a:t></a:r>",
       "<a:r><a:t> </a:t></a:r>",
       "<a:r><a:t>202</a:t></a:r>",
@@ -39,6 +41,30 @@ async function makeMinimalPptxArrayBuffer() {
   );
 
   zip.file("ppt/slides/slide9.xml", "<last-slide>DO NOT TOUCH</last-slide>");
+
+  zip.file(
+    "ppt/presentation.xml",
+    [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+      "<p:sldIdLst>",
+      '<p:sldId id="256" r:id="rId1"/>',
+      '<p:sldId id="257" r:id="rId2"/>',
+      "</p:sldIdLst>",
+      "</p:presentation>",
+    ].join("")
+  );
+
+  zip.file(
+    "ppt/_rels/presentation.xml.rels",
+    [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>',
+      '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide9.xml"/>',
+      "</Relationships>",
+    ].join("")
+  );
 
   const bytes = await zip.generateAsync({ type: "uint8array" });
   return bytes.buffer;
@@ -94,6 +120,15 @@ describe("PPTX preview regeneration", () => {
     // Carousel nav should exist (regression guard).
     expect(screen.getByRole("button", { name: "Prev" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next" })).toBeInTheDocument();
+
+    // Default deck should now be exactly 2 slides (Slide 1 + last).
+    await waitFor(
+      () => {
+        const indicator = screen.getByLabelText("Slide indicator");
+        expect(indicator.textContent).toMatch(/\/\s*2/);
+      },
+      { timeout: 5000 }
+    );
 
     global.fetch = prevFetch;
   });

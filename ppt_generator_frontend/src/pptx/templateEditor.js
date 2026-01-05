@@ -19,6 +19,8 @@ import { saveAs } from "file-saver";
  */
 
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
+const PRESENTATION_XML_PATH = "ppt/presentation.xml";
+const PRESENTATION_RELS_XML_PATH = "ppt/_rels/presentation.xml.rels";
 
 /**
  * PUBLIC_INTERFACE
@@ -544,4 +546,165 @@ export async function assertLastSlideUnchanged(originalPptxArrayBuffer, updatedP
   }
 
   return true;
+}
+
+/**
+ * Finds slide XML part names and returns sorted slide numbers and paths.
+ */
+function listSlideXmlPaths(zip) {
+  const slidePaths = zip.file(/^ppt\/slides\/slide\d+\.xml$/).map((f) => f.name);
+  const parsed = slidePaths
+    .map((p) => ({ path: p, n: Number(p.match(/slide(\d+)\.xml$/)?.[1] ?? 0) }))
+    .filter((x) => Number.isFinite(x.n) && x.n > 0)
+    .sort((a, b) => a.n - b.n);
+
+  return parsed;
+}
+
+function parseRelationships(relsXml) {
+  const relRe =
+    /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bType="([^"]+)"[^>]*\bTarget="([^"]+)"[^>]*\/>/g;
+  const rels = [];
+  let m;
+  while ((m = relRe.exec(relsXml)) !== null) {
+    rels.push({ id: m[1], type: m[2], target: m[3], raw: m[0] });
+  }
+  return rels;
+}
+
+function replaceOnce(haystack, needle, replacement) {
+  const idx = haystack.indexOf(needle);
+  if (idx < 0) return null;
+  return haystack.slice(0, idx) + replacement + haystack.slice(idx + needle.length);
+}
+
+/**
+ * Extracts rId list from <p:sldIdLst> and returns:
+ * - sldIdLstXml: full XML of the list node (string)
+ * - entries: [{ id: number, rId: string, raw: string }]
+ */
+function parseSldIdList(presentationXml) {
+  const listMatch = presentationXml.match(/<p:sldIdLst\b[\s\S]*?<\/p:sldIdLst>/);
+  if (!listMatch) {
+    throw new Error("presentation.xml missing <p:sldIdLst>.");
+  }
+
+  const sldIdLstXml = listMatch[0];
+  const entryRe = /<p:sldId\b[^>]*\/>/g;
+  const entries = [];
+  let m;
+  while ((m = entryRe.exec(sldIdLstXml)) !== null) {
+    const raw = m[0];
+    const id = Number(raw.match(/\bid="(\d+)"/)?.[1] ?? 0);
+    const rId = raw.match(/\br:id="([^"]+)"/)?.[1] ?? "";
+    if (Number.isFinite(id) && id > 0 && rId) {
+      entries.push({ id, rId, raw });
+    }
+  }
+
+  return { sldIdLstXml, entries };
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * Prunes the PPTX to only include Slide 1 and the template's last slide (by deck order),
+ * while keeping the *last slide XML bytes* untouched.
+ *
+ * Why this exists:
+ * - The product requirement is a two-slide default deck (Slide 1 + last slide).
+ * - Slide 1 is still date-only editable (handled elsewhere).
+ * - The last slide must remain byte-for-byte identical to the template:
+ *   we therefore do NOT touch its slideN.xml part at all.
+ *
+ * What this function changes:
+ * - Updates ppt/presentation.xml <p:sldIdLst> to only keep the first and last entries.
+ * - Updates ppt/_rels/presentation.xml.rels to remove unreferenced slide relationships.
+ *
+ * What this function intentionally does NOT do:
+ * - It does NOT delete intermediate slide parts from the zip; they are simply no longer referenced.
+ *   This is safer for invariants and avoids touching unrelated bytes.
+ *
+ * @param {Uint8Array} pptxBytes - PPTX bytes after date-only edit
+ * @returns {Promise<{ updatedPptxBytes: Uint8Array, kept: { firstSlideNumber:number, lastSlideNumber:number } }>}
+ */
+export async function prunePptxToFirstAndLastSlides(pptxBytes) {
+  /** This is a public function. */
+  if (!pptxBytes || !pptxBytes.length) throw new Error("No PPTX bytes provided.");
+
+  const zip = await JSZip.loadAsync(pptxBytes);
+
+  const presFile = zip.file(PRESENTATION_XML_PATH);
+  const presRelsFile = zip.file(PRESENTATION_RELS_XML_PATH);
+  if (!presFile) throw new Error(`Missing required PPTX part: ${PRESENTATION_XML_PATH}`);
+  if (!presRelsFile) throw new Error(`Missing required PPTX part: ${PRESENTATION_RELS_XML_PATH}`);
+
+  const presXmlOriginal = await presFile.async("string");
+  const { sldIdLstXml, entries } = parseSldIdList(presXmlOriginal);
+
+  if (entries.length < 2) {
+    // Nothing to prune.
+    return {
+      updatedPptxBytes: new Uint8Array(pptxBytes),
+      kept: { firstSlideNumber: 1, lastSlideNumber: entries.length === 1 ? 1 : 0 },
+    };
+  }
+
+  const firstEntry = entries[0];
+  const lastEntry = entries[entries.length - 1];
+
+  // Best-effort slide numbers (used only for debug/reporting, not correctness).
+  // Map rId -> slideN by reading presentation.xml.rels targets.
+  const presRelsXmlOriginal = await presRelsFile.async("string");
+  const rels = parseRelationships(presRelsXmlOriginal);
+  const ridToTarget = new Map(rels.map((r) => [r.id, r.target]));
+
+  const toSlideNumber = (rid) => {
+    const tgt = ridToTarget.get(rid) || "";
+    const m = tgt.match(/slides\/slide(\d+)\.xml$/);
+    const n = Number(m?.[1] ?? 0);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const firstSlideNumber = toSlideNumber(firstEntry.rId) || 1;
+  const lastSlideNumber = toSlideNumber(lastEntry.rId) || 0;
+
+  // 1) Update presentation.xml: keep only first+last nodes.
+  const newSldIdLstXml = (() => {
+    // Preserve original wrapper (<p:sldIdLst ...> ... </p:sldIdLst>) and inject only the two nodes.
+    const openTag = sldIdLstXml.match(/^<p:sldIdLst\b[\s\S]*?>/)?.[0];
+    const closeTag = "</p:sldIdLst>";
+    if (!openTag || !sldIdLstXml.endsWith(closeTag)) {
+      throw new Error("presentation.xml <p:sldIdLst> parse failed.");
+    }
+    return `${openTag}${firstEntry.raw}${lastEntry.raw}${closeTag}`;
+  })();
+
+  const presXmlUpdated = (() => {
+    const replaced = replaceOnce(presXmlOriginal, sldIdLstXml, newSldIdLstXml);
+    if (!replaced) throw new Error("Failed to update presentation.xml <p:sldIdLst>.");
+    return replaced;
+  })();
+
+  zip.file(PRESENTATION_XML_PATH, presXmlUpdated);
+
+  // 2) Update presentation.xml.rels: remove slide relationships not referenced by the kept rIds.
+  // Keep *all other* relationship types unchanged.
+  const keptRids = new Set([firstEntry.rId, lastEntry.rId]);
+  const filteredRelsXml = (() => {
+    // Remove any <Relationship ...Type=".../slide"...> whose Id is not in keptRids.
+    // Do not attempt full reformatting; just strip the nodes.
+    return presRelsXmlOriginal.replace(
+      /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bType="http:\/\/schemas\.openxmlformats\.org\/officeDocument\/2006\/relationships\/slide"[^>]*\/>/g,
+      (full, rid) => (keptRids.has(rid) ? full : "")
+    );
+  })();
+
+  zip.file(PRESENTATION_RELS_XML_PATH, filteredRelsXml);
+
+  const out = await zip.generateAsync({ type: "uint8array" });
+
+  return {
+    updatedPptxBytes: out,
+    kept: { firstSlideNumber, lastSlideNumber },
+  };
 }

@@ -218,8 +218,9 @@ export default function PptxPreview({
                 </div>
               ) : (
                 <div className="hint">
-                  Inserts 4 slides per factory before the final slide. Slide 1 remains date-only
-                  editable; the last slide stays unchanged.
+                  Default deck is 2 slides (Slide 1 + final). Clicking Add inserts 4 slides per
+                  factory before the final slide. Slide 1 remains date-only editable; the final
+                  slide stays unchanged.
                 </div>
               )}
             </div>
@@ -227,8 +228,10 @@ export default function PptxPreview({
         </div>
 
         <div className="hint">
-          Slide-by-slide preview (landscape). Slide 1 matches the template visuals; only
-          the date text is edited in the PPTX. The last slide remains byte-identical.
+          Slide-by-slide preview (landscape). Default output contains only Slide 1 and the
+          final slide; only the Slide 1 date is edited in the PPTX. Factory slides are inserted
+          only after you click “Add Skill Factory”, and they appear before the final slide.
+          The final slide remains byte-identical.
           {debug && slideSize ? (
             <>
               {" "}

@@ -5,6 +5,7 @@ import {
   createPptxObjectUrl,
   downloadPptxBytes,
   fetchBundledTemplatePptx,
+  prunePptxToFirstAndLastSlides,
   todayIsoDate,
   updatePptxDateOnly,
 } from "./pptx/templateEditor";
@@ -145,14 +146,22 @@ function App() {
           const { updatedPptxBytes: dateOnlyBytes, detected } =
             await updatePptxDateOnly(templateBytes, dateISO);
 
-          let finalBytes = dateOnlyBytes;
+          // Default-deck behavior: keep only Slide 1 and the template's last slide.
+          // This ensures preview/download start as a 2-slide deck, while preserving:
+          // - Slide 1 is date-only editable (already applied above)
+          // - Last slide remains unchanged (we never touch last slide XML bytes)
+          const { updatedPptxBytes: prunedBytes } =
+            await prunePptxToFirstAndLastSlides(dateOnlyBytes);
+
+          let finalBytes = prunedBytes;
 
           // Optional: insert Skill Factory slides (4 per factory), inserted before the last slide.
           // IMPORTANT: This must NOT modify the template's last slide bytes.
+          // Note: skillFactories is empty by default; factories are only added when user clicks "Add".
           if (skillFactories.length) {
             setPipeline({
               step: "edit:loading",
-              detail: `date=${dateISO}, skillFactories=${skillFactories.length}`,
+              detail: `date=${dateISO}, pruned=1, skillFactories=${skillFactories.length}`,
             });
 
             // Apply factories in sequence to ensure ordering is stable.
@@ -260,7 +269,7 @@ function App() {
             <div className="brand-text">
               <div className="brand-title">Default Template (Date Only)</div>
               <div className="brand-subtitle">
-                Only Slide 1 date is editable • all other content locked • last
+                Default deck: Slide 1 + final slide • only Slide 1 date is editable • final
                 slide preserved exactly
               </div>
             </div>
