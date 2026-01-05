@@ -301,17 +301,7 @@ export default function PptxPreview({
             Next
           </button>
 
-          <div className="carousel-indicator" aria-label="Slide indicator">
-            Slide <strong>{totalSlides ? currentSlideNumber : "—"}</strong> /{" "}
-            <strong>{totalSlides || "—"}</strong>
-            {currentSlideNumber === 1 ? (
-              <span className="carousel-badge editable">date editable</span>
-            ) : currentSlideNumber === slideIndexes[slideIndexes.length - 1] ? (
-              <span className="carousel-badge locked">locked (last)</span>
-            ) : (
-              <span className="carousel-badge locked">locked</span>
-            )}
-          </div>
+
         </div>
 
         <div className="carousel-stage" aria-label="Slide preview stage">
