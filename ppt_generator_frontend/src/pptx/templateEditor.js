@@ -4,42 +4,20 @@ import { saveAs } from "file-saver";
 /**
  * STRICT TEMPLATE RULES (user requirements):
  * - The app ships with a built-in PPTX: `public/assets/template.pptx`.
- * - Slide 1 must remain byte-for-byte identical to the template EXCEPT for:
- *    (a) the date text content (editable), AND
- *    (b) replacing the existing text/empty placeholder directly above the Name
- *        with the non-editable label "TATA ELXSI" (Slide 1 only).
- * - Do NOT add a new line for the label and do NOT overlap the Name:
- *   we must use the existing placeholder/shape that sits above the Name and set
- *   its text to exactly "TATA ELXSI".
- * - Preserve the last slide exactly with no processing: we therefore do not
- *   modify any files except `ppt/slides/slide1.xml`.
+ * - Only the Slide 1 date text content is editable.
+ * - Do NOT alter any other slides, and preserve the last slide byte-for-byte.
  *
  * Implementation approach (byte-preserving):
  * - Read `ppt/slides/slide1.xml` as a string (do not parse/re-serialize XML).
- * - Ensure the "TATA ELXSI" label exists by targeting the existing shape
- *   above Name in the bundled template (shape cNvPr id="8", name="object 8").
- * - Update only:
- *    - the <a:t> value(s) within that label placeholder shape (slide 1 only),
- *      without changing any geometry or adding paragraphs.
- *    - the existing <a:t> node values within the 5 date runs.
+ * - Update only the existing <a:t> node values within the 5 date runs.
+ * - Do not modify any other file in the PPTX zip.
  *
  * NOTE:
- * - We intentionally keep the label non-editable: it is enforced to the same
- *   string on every generation.
+ * This file previously enforced a static "TATA ELXSI" label on Slide 1. That behavior
+ * has been reverted to restore Slide 1 to its prior state; only the date is updated.
  */
 
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
-const STATIC_LABEL_TEXT = "TATA ELXSI";
-
-/**
- * Template-specific: the placeholder directly above the "Name" row (verified in the bundled template).
- *
- * IMPORTANT:
- * - We must NOT move shapes or change geometry; only replace text in the existing placeholder.
- * - This ensures alignment/spacing exactly matches the template (and the latest screenshot reference).
- */
-const LABEL_SHAPE_ID = "8";
-const LABEL_SHAPE_NAME = "object 8";
 
 /**
  * PUBLIC_INTERFACE
@@ -299,188 +277,11 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
 }
 
 /**
- * Sets the static label text into the existing placeholder shape above the Name.
- *
- * IMPORTANT:
- * - This MUST preserve styling + precise placement from the PPT template (per latest image).
- *   Therefore we ONLY replace text inside an existing <a:t> node of the existing shape.
- * - We do NOT add paragraphs, do NOT add new runs, and do NOT change geometry.
- * - If the placeholder has no existing <a:t>, we insert exactly ONE styled run
- *   (user-approved) into the existing first paragraph, without adding paragraphs
- *   and without changing any geometry.
- */
-function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
-  const shapes = collectShapeBlocks(slide1Xml);
-
-  const labelCandidates = shapes.filter((s) => {
-    const sid = getShapeId(s.xml);
-    const sname = getShapeName(s.xml);
-    return sid === LABEL_SHAPE_ID || sname === LABEL_SHAPE_NAME;
-  });
-
-  if (labelCandidates.length !== 1) {
-    throw new Error(
-      `Strict template mismatch: expected exactly 1 label placeholder shape (id=${LABEL_SHAPE_ID} or name="${LABEL_SHAPE_NAME}"), found ${labelCandidates.length}.`
-    );
-  }
-
-  const shape = labelCandidates[0];
-
-  // If label already exists exactly, do nothing.
-  if (shape.xml.includes(`>${STATIC_LABEL_TEXT}<`)) {
-    return { updatedSlide1Xml: slide1Xml, changed: false, allowedATextNodePairs: [] };
-  }
-
-  const { scopeXml, scopeOffset, paragraphs } = collectParagraphsFromShape(shape.xml);
-  if (!paragraphs.length) {
-    throw new Error("Strict template mismatch: label placeholder contains no paragraphs.");
-  }
-
-  // Use the first paragraph only; we must not introduce extra lines (no new <a:p>).
-  const para = paragraphs[0];
-  const paraXml = para.xml;
-
-  const runs = collectRunsFromParagraph(paraXml);
-  const runIndexWithText = runs.findIndex((r) => /<a:t\b/.test(r));
-
-  // Path A: Preferred — replace text in an existing <a:t> to preserve styling/layout.
-  if (runIndexWithText >= 0) {
-    const targetRun = runs[runIndexWithText];
-
-    const originalNode = targetRun.match(/<a:t\b[^>]*>[\s\S]*?<\/a:t>/)?.[0] ?? "";
-    if (!originalNode) {
-      throw new Error(
-        "Strict template mismatch: expected an <a:t> node in the label placeholder run."
-      );
-    }
-
-    const updatedNode = originalNode.replace(
-      /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
-      `$1${escapeXmlText(STATIC_LABEL_TEXT)}$3`
-    );
-
-    const replacedRun = targetRun.replace(originalNode, updatedNode);
-    const updatedParaXml = paraXml.replace(targetRun, replacedRun);
-
-    const updatedScopeXml =
-      scopeXml.slice(0, para.startInScope) +
-      updatedParaXml +
-      scopeXml.slice(para.endInScope);
-
-    const updatedShapeXml =
-      shape.xml.slice(0, scopeOffset) +
-      updatedScopeXml +
-      shape.xml.slice(scopeOffset + scopeXml.length);
-
-    const updatedSlide1Xml =
-      slide1Xml.slice(0, shape.start) + updatedShapeXml + slide1Xml.slice(shape.end);
-
-    return {
-      updatedSlide1Xml,
-      changed: true,
-      allowedATextNodePairs: [{ originalNode, updatedNode }],
-    };
-  }
-
-  /**
-   * Path B: User-approved exception — the label placeholder has no <a:t> runs.
-   *
-   * Requirement:
-   * - Insert EXACTLY ONE styled <a:r><a:t> run into the existing placeholder paragraph.
-   * - No new paragraphs and no extra lines.
-   * - Copy the style from the latest screenshot: in the PPT, this corresponds to the
-   *   "Name" row’s label styling. We therefore clone the first run from the "Name"
-   *   label shape (its <a:rPr>) and use that for the inserted run.
-   *
-   * This keeps geometry untouched (no <a:xfrm> changes) and minimizes layout risk.
-   */
-  const findNameStyleSeedRPr = () => {
-    // Find a shape containing "Name</a:t>" and use its first run <a:rPr> as the style seed.
-    const nameShape = shapes.find((s) => s.xml.includes(">Name</a:t>"));
-    if (!nameShape) return "";
-
-    const { paragraphs: nameParas } = collectParagraphsFromShape(nameShape.xml);
-    const namePara = nameParas.find((p) => p.xml.includes(">Name</a:t>")) ?? nameParas[0];
-    if (!namePara) return "";
-
-    const nameRuns = collectRunsFromParagraph(namePara.xml);
-    const nameRunWithText = nameRuns.find((r) => /<a:t\b/.test(r)) ?? "";
-    if (!nameRunWithText) return "";
-
-    return nameRunWithText.match(/<a:rPr\b[\s\S]*?<\/a:rPr>/)?.[0] ?? "";
-  };
-
-  const rPrXml = findNameStyleSeedRPr();
-
-  // Construct exactly one run with exactly one <a:t>.
-  const insertedRun = `<a:r>${rPrXml}<a:t>${escapeXmlText(STATIC_LABEL_TEXT)}</a:t></a:r>`;
-  const insertedNode = insertedRun.match(/<a:t\b[^>]*>[\s\S]*?<\/a:t>/)?.[0] ?? "";
-  if (!insertedNode) {
-    throw new Error("Internal error: failed to build inserted label <a:t> node.");
-  }
-
-  // We need the guard to allow the label's <a:t> node to change, so we must map
-  // an original <a:t> node in this placeholder to the inserted node.
-  // In this scenario there is no <a:t> in the paragraph, but the overall slide
-  // still has at least one <a:t> inside this shape in the template (otherwise we
-  // cannot insert without changing <a:t> node count). If not, we must refuse.
-  const originalShapeATextNodes = shape.xml.match(/<a:t\b[^>]*>[\s\S]*?<\/a:t>/g) ?? [];
-  if (!originalShapeATextNodes.length) {
-    throw new Error(
-      "Strict template mismatch: label placeholder has no <a:t> nodes anywhere; inserting a run would change <a:t> node count."
-    );
-  }
-
-  // Pick the first available <a:t> node from this shape as the one whose text we are "replacing".
-  // This keeps <a:t> node count unchanged and stays within the approved edit scope.
-  const originalNode = originalShapeATextNodes[0];
-
-  // Replace that node in the SHAPE XML with the new label text node (keeping attributes).
-  const updatedNode = originalNode.replace(
-    /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
-    `$1${escapeXmlText(STATIC_LABEL_TEXT)}$3`
-  );
-
-  // Now apply the replacement in the paragraph by injecting a single run.
-  // We still must not add paragraphs. We insert just before </a:p>.
-  const updatedParaXml = paraXml.replace(/<\/a:p>$/, `${insertedRun}</a:p>`);
-  if (updatedParaXml === paraXml) {
-    throw new Error(
-      "Strict template mismatch: failed to insert the single label run (could not locate </a:p>)."
-    );
-  }
-
-  const updatedScopeXml =
-    scopeXml.slice(0, para.startInScope) +
-    updatedParaXml +
-    scopeXml.slice(para.endInScope);
-
-  const updatedShapeXml =
-    shape.xml.slice(0, scopeOffset) +
-    updatedScopeXml +
-    shape.xml.slice(scopeOffset + scopeXml.length);
-
-  const updatedSlide1Xml =
-    slide1Xml.slice(0, shape.start) + updatedShapeXml + slide1Xml.slice(shape.end);
-
-  return {
-    updatedSlide1Xml,
-    changed: true,
-    // Allow the guard to treat the label placeholder text as permitted to differ.
-    // We allow it by mapping an original <a:t> node string to the expected updated one.
-    allowedATextNodePairs: [{ originalNode, updatedNode }],
-  };
-}
-
-/**
  * PUBLIC_INTERFACE
- * Updates ONLY the date field on slide 1 for the shipped default template,
- * while also ensuring the label placeholder above Name reads "TATA ELXSI" (Slide 1).
+ * Updates ONLY the date field on slide 1 for the shipped default template.
  *
  * Guarantees:
- * - slide1.xml is identical except for:
- *    - the label placeholder's text runs (enforced to "TATA ELXSI"), and
- *    - the targeted date <a:t> nodes.
+ * - slide1.xml is identical except for the targeted date <a:t> nodes.
  * - Does not alter any <a:rPr>, paragraph properties, shape geometry, or layout.
  * - Does not change any other files; last slide stays byte-identical.
  *
@@ -504,14 +305,8 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
 
   const slide1XmlOriginal = await slide1File.async("string");
 
-  // Step 0: ensure the static label is placed in the existing placeholder above Name.
-  const labelResult = setStaticLabelInExistingPlaceholder({
-    slide1Xml: slide1XmlOriginal,
-  });
-  const slide1XmlWithLabel = labelResult.updatedSlide1Xml;
-
-  // From here on, all date edits operate on slide1XmlWithLabel.
-  const shapes = collectShapeBlocks(slide1XmlWithLabel);
+  // Date edits operate only on Slide 1.
+  const shapes = collectShapeBlocks(slide1XmlOriginal);
   const dateLabelCandidates = shapes.filter((s) => s.xml.includes("Date</a:t>"));
 
   if (dateLabelCandidates.length < 1) {
@@ -636,20 +431,18 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     shape.xml.slice(scopeOffset + scopeXml.length);
 
   const updatedSlide1Xml =
-    slide1XmlWithLabel.slice(0, shape.start) +
+    slide1XmlOriginal.slice(0, shape.start) +
     updatedShapeXml +
-    slide1XmlWithLabel.slice(shape.end);
+    slide1XmlOriginal.slice(shape.end);
 
-  // Guard: allow only:
-  // - the 5 intended date <a:t> nodes, and
-  // - the label placeholder’s <a:t> node(s) needed to enforce "TATA ELXSI".
+  // Guard: allow only the 5 intended date <a:t> nodes.
   // Everything else in slide1.xml must remain byte-for-byte identical (structure preserved).
   verifyOnlyAllowedSlide1DiffsByATextNodes({
-    originalSlide1Xml: slide1XmlWithLabel,
+    originalSlide1Xml: slide1XmlOriginal,
     updatedSlide1Xml,
     dateParagraphXmlOriginal: paragraphXml,
     allowedDateRunIndexes: dateRunIndexes,
-    allowedAdditionalATextNodePairs: labelResult.allowedATextNodePairs ?? [],
+    allowedAdditionalATextNodePairs: [],
   });
 
   zip.file(SLIDE1_PATH, updatedSlide1Xml);
@@ -659,9 +452,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   return {
     updatedPptxBytes: out,
     detected: {
-      mode: labelResult.changed
-        ? "strict-template/set-existing-label-placeholder+date-only-node-guard"
-        : "strict-template/date-only-node-guard",
+      mode: "strict-template/date-only-node-guard",
       slidePath: SLIDE1_PATH,
       shapeName,
       shapeId,
