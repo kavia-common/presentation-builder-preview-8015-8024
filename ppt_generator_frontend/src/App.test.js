@@ -6,7 +6,8 @@ import { assertLastSlideUnchanged, updatePptxDateOnly } from "./pptx/templateEdi
 
 async function makeMinimalPptxArrayBuffer() {
   // Minimal PPTX-like zip with slide1.xml containing the expected strict date runs.
-  // Also include slide14.xml so we can assert it remains untouched.
+  // Also include a "last slide" with the highest slide number so we can assert it remains untouched.
+  // Our invariant checker detects the last slide dynamically (highest slideN.xml).
   const zip = new JSZip();
 
   zip.file(
@@ -32,7 +33,7 @@ async function makeMinimalPptxArrayBuffer() {
     ].join("")
   );
 
-  zip.file("ppt/slides/slide14.xml", "<last-slide>DO NOT TOUCH</last-slide>");
+  zip.file("ppt/slides/slide9.xml", "<last-slide>DO NOT TOUCH</last-slide>");
 
   const bytes = await zip.generateAsync({ type: "uint8array" });
   return bytes.buffer;

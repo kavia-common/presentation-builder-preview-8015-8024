@@ -502,10 +502,25 @@ export function todayIsoDate() {
  * @returns {Promise<boolean>} true if unchanged, else throws Error
  */
 export async function assertLastSlideUnchanged(originalPptxArrayBuffer, updatedPptxBytes) {
-  const LAST_SLIDE_PATH = "ppt/slides/slide14.xml";
-
   const originalZip = await JSZip.loadAsync(originalPptxArrayBuffer);
   const updatedZip = await JSZip.loadAsync(updatedPptxBytes);
+
+  // Determine the "last slide" path from the original template at runtime.
+  // This makes the invariant robust even if the bundled template slide count changes.
+  const slidePaths = originalZip
+    .file(/^ppt\/slides\/slide\d+\.xml$/)
+    .map((f) => f.name)
+    .sort((a, b) => {
+      const na = Number(a.match(/slide(\d+)\.xml$/)?.[1] ?? 0);
+      const nb = Number(b.match(/slide(\d+)\.xml$/)?.[1] ?? 0);
+      return na - nb;
+    });
+
+  if (!slidePaths.length) {
+    throw new Error("Invariant check failed: original PPTX contains no slide XML parts.");
+  }
+
+  const LAST_SLIDE_PATH = slidePaths[slidePaths.length - 1];
 
   const orig = originalZip.file(LAST_SLIDE_PATH);
   const next = updatedZip.file(LAST_SLIDE_PATH);
