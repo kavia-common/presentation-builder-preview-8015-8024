@@ -1,46 +1,328 @@
-import React, { useState, useEffect } from 'react';
-import logo from './logo.svg';
-import './App.css';
+import React, { useEffect, useMemo, useState } from "react";
+import "./App.css";
+import {
+  createPptxObjectUrl,
+  downloadPptxBytes,
+  fetchBundledTemplatePptx,
+  readFileAsArrayBuffer,
+  todayIsoDate,
+  updatePptxDateOnly,
+} from "./pptx/templateEditor";
 
 // PUBLIC_INTERFACE
 function App() {
-  const [theme, setTheme] = useState('light');
+  const [theme, setTheme] = useState("light");
 
-  // Effect to apply theme to document element
+  const [templateSource, setTemplateSource] = useState("bundled"); // 'bundled' | 'upload'
+  const [uploadedFileName, setUploadedFileName] = useState("");
+  const [templateBytes, setTemplateBytes] = useState(null); // ArrayBuffer
+
+  const [dateISO, setDateISO] = useState(todayIsoDate());
+
+  const [generatedBytes, setGeneratedBytes] = useState(null); // Uint8Array
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [status, setStatus] = useState({ kind: "idle", message: "" });
+  const [detectionInfo, setDetectionInfo] = useState(null);
+
+  // Apply theme to document
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
+    document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  // Load bundled template by default
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadBundled() {
+      try {
+        setStatus({ kind: "loading", message: "Loading bundled PPTX template…" });
+        const bytes = await fetchBundledTemplatePptx();
+        if (cancelled) return;
+        setTemplateBytes(bytes);
+        setUploadedFileName("");
+        setStatus({ kind: "ready", message: "Bundled template loaded." });
+      } catch (e) {
+        if (cancelled) return;
+        setStatus({
+          kind: "error",
+          message:
+            e instanceof Error ? e.message : "Failed to load bundled template.",
+        });
+      }
+    }
+
+    if (templateSource === "bundled") {
+      loadBundled();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [templateSource]);
+
+  // Regenerate PPTX any time date or template changes
+  useEffect(() => {
+    let cancelled = false;
+
+    async function regenerate() {
+      if (!templateBytes) return;
+
+      try {
+        setStatus({ kind: "loading", message: "Generating preview (date only)…" });
+        const { updatedPptxBytes, detected } = await updatePptxDateOnly(
+          templateBytes,
+          dateISO
+        );
+        if (cancelled) return;
+
+        setGeneratedBytes(updatedPptxBytes);
+        setDetectionInfo(detected);
+
+        // Refresh preview URL
+        setPreviewUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return createPptxObjectUrl(updatedPptxBytes);
+        });
+
+        setStatus({ kind: "ready", message: "Preview updated." });
+      } catch (e) {
+        if (cancelled) return;
+        setGeneratedBytes(null);
+        setDetectionInfo(null);
+        setPreviewUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return "";
+        });
+        setStatus({
+          kind: "error",
+          message:
+            e instanceof Error
+              ? e.message
+              : "Failed to generate PPTX preview.",
+        });
+      }
+    }
+
+    regenerate();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [templateBytes, dateISO]);
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
 
   // PUBLIC_INTERFACE
   const toggleTheme = () => {
-    setTheme(prevTheme => prevTheme === 'light' ? 'dark' : 'light');
+    setTheme((prevTheme) => (prevTheme === "light" ? "dark" : "light"));
   };
 
+  const canDownload = useMemo(() => !!generatedBytes, [generatedBytes]);
+
   return (
-    <div className="App">
-      <header className="App-header">
-        <button 
-          className="theme-toggle" 
-          onClick={toggleTheme}
-          aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
-        >
-          {theme === 'light' ? '🌙 Dark' : '☀️ Light'}
-        </button>
-        <img src={logo} className="App-logo" alt="logo" />
-        <p>
-          Edit <code>src/App.js</code> and save to reload.
-        </p>
-        <p>
-          Current theme: <strong>{theme}</strong>
-        </p>
-        <a
-          className="App-link"
-          href="https://reactjs.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Learn React
-        </a>
+    <div className="App ocean">
+      <header className="ocean-header">
+        <div className="ocean-topbar">
+          <div className="brand">
+            <div className="brand-mark" aria-hidden="true" />
+            <div className="brand-text">
+              <div className="brand-title">PPT Template Date Editor</div>
+              <div className="brand-subtitle">
+                Slide 1 date only • all other content locked (last slide unchanged)
+              </div>
+            </div>
+          </div>
+
+          <button
+            className="btn btn-secondary"
+            onClick={toggleTheme}
+            aria-label={`Switch to ${theme === "light" ? "dark" : "light"} mode`}
+            type="button"
+          >
+            {theme === "light" ? "Dark mode" : "Light mode"}
+          </button>
+        </div>
+
+        <main className="ocean-main">
+          <section className="card controls" aria-label="Template controls">
+            <div className="card-header">
+              <h2>Template</h2>
+              <p>
+                Use the bundled PPTX template or upload a PPTX. Only the date field
+                on slide 1 is editable.
+              </p>
+            </div>
+
+            <div className="field-row">
+              <label className="radio">
+                <input
+                  type="radio"
+                  name="templateSource"
+                  value="bundled"
+                  checked={templateSource === "bundled"}
+                  onChange={() => setTemplateSource("bundled")}
+                />
+                <span>
+                  Use bundled template{" "}
+                  <span className="hint">(public/assets/template.pptx)</span>
+                </span>
+              </label>
+
+              <label className="radio">
+                <input
+                  type="radio"
+                  name="templateSource"
+                  value="upload"
+                  checked={templateSource === "upload"}
+                  onChange={() => setTemplateSource("upload")}
+                />
+                <span>Upload template</span>
+              </label>
+            </div>
+
+            <div className="field-row">
+              <div className="field">
+                <label htmlFor="pptxUpload">PPTX file</label>
+                <input
+                  id="pptxUpload"
+                  type="file"
+                  accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                  disabled={templateSource !== "upload"}
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+
+                    try {
+                      setStatus({ kind: "loading", message: "Reading uploaded PPTX…" });
+                      const bytes = await readFileAsArrayBuffer(file);
+                      setTemplateBytes(bytes);
+                      setUploadedFileName(file.name);
+                      setStatus({ kind: "ready", message: "Uploaded template loaded." });
+                    } catch (err) {
+                      setStatus({
+                        kind: "error",
+                        message:
+                          err instanceof Error ? err.message : "Failed to read upload.",
+                      });
+                    }
+                  }}
+                />
+                <div className="hint">
+                  {templateSource === "upload" ? (
+                    uploadedFileName ? (
+                      <>Loaded: <strong>{uploadedFileName}</strong></>
+                    ) : (
+                      "Select a .pptx file."
+                    )
+                  ) : (
+                    "Using bundled template."
+                  )}
+                </div>
+              </div>
+
+              <div className="field">
+                <label htmlFor="dateInput">Slide 1 Date</label>
+                <input
+                  id="dateInput"
+                  className="date-input"
+                  type="date"
+                  value={dateISO}
+                  onChange={(e) => setDateISO(e.target.value)}
+                />
+                <div className="hint">
+                  This will update only the date text on slide 1. All other slides,
+                  including the last slide, are preserved.
+                </div>
+              </div>
+            </div>
+
+            <div className="status-row" role="status" aria-live="polite">
+              <span
+                className={`status-pill ${
+                  status.kind === "error"
+                    ? "error"
+                    : status.kind === "loading"
+                      ? "loading"
+                      : "ok"
+                }`}
+              >
+                {status.kind.toUpperCase()}
+              </span>
+              <span className="status-text">{status.message}</span>
+            </div>
+
+            <div className="actions">
+              <button
+                className="btn btn-primary"
+                type="button"
+                disabled={!canDownload}
+                onClick={() => {
+                  if (!generatedBytes) return;
+                  const name = `Updated_Template_${dateISO}.pptx`;
+                  downloadPptxBytes(generatedBytes, name);
+                }}
+              >
+                Download PPTX
+              </button>
+
+              <div className="meta">
+                {detectionInfo ? (
+                  <div className="hint">
+                    Placeholder detection:{" "}
+                    <strong>{detectionInfo.mode}</strong>
+                    {detectionInfo.mode === "token" ? (
+                      <> (token: <code>{detectionInfo.token}</code>)</>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="hint">
+                    Tip: For best reliability across templates, place a{" "}
+                    <code>{"{{DATE}}"}</code> token in slide 1.
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+
+          <section className="card preview" aria-label="Preview">
+            <div className="card-header">
+              <h2>Preview</h2>
+              <p>
+                Browser preview support for PPTX varies. This embeds the generated
+                PPTX as a blob URL. If your browser cannot render it, use Download.
+              </p>
+            </div>
+
+            {previewUrl ? (
+              <div className="preview-frame-wrap">
+                {/* Many browsers won't natively render PPTX; still provides a consistent "preview area".
+                   If unsupported, user will see a download prompt or blank frame. */}
+                <iframe
+                  title="PPTX Preview"
+                  className="preview-frame"
+                  src={previewUrl}
+                />
+              </div>
+            ) : (
+              <div className="empty-preview">
+                Preview will appear here once the template is loaded and the PPTX
+                is generated.
+              </div>
+            )}
+          </section>
+        </main>
+
+        <footer className="ocean-footer">
+          <div className="footer-note">
+            Locking behavior: The app edits only <code>ppt/slides/slide1.xml</code>.
+            All other files in the PPTX zip are left unchanged, so the last slide
+            remains exactly as-is.
+          </div>
+        </footer>
       </header>
     </div>
   );

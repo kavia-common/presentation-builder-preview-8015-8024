@@ -1,104 +1,320 @@
-/* CSS Variables for Theme Management */
+/* Ocean Professional theme tokens */
 :root {
-  /* Light theme colors */
-  --bg-primary: #ffffff;
-  --bg-secondary: #f8f9fa;
-  --text-primary: #282c34;
-  --text-secondary: #61dafb;
-  --border-color: #e9ecef;
-  --button-bg: #007bff;
+  --ocean-primary: #2563eb;
+  --ocean-secondary: #f59e0b;
+  --ocean-bg: #f9fafb;
+  --ocean-surface: #ffffff;
+  --ocean-text: #111827;
+  --ocean-muted: #6b7280;
+  --ocean-border: rgba(17, 24, 39, 0.12);
+  --ocean-shadow: 0 8px 24px rgba(17, 24, 39, 0.08);
+  --ocean-radius: 14px;
+
+  /* Existing theme vars (kept for compatibility) */
+  --bg-primary: var(--ocean-bg);
+  --bg-secondary: var(--ocean-surface);
+  --text-primary: var(--ocean-text);
+  --text-secondary: var(--ocean-primary);
+  --border-color: var(--ocean-border);
+  --button-bg: var(--ocean-primary);
   --button-text: #ffffff;
 }
 
 [data-theme="dark"] {
-  /* Dark theme colors */
-  --bg-primary: #1a1a1a;
-  --bg-secondary: #282c34;
-  --text-primary: #ffffff;
-  --text-secondary: #61dafb;
-  --border-color: #404040;
-  --button-bg: #0056b3;
+  --ocean-bg: #0b1220;
+  --ocean-surface: #111a2e;
+  --ocean-text: #f3f4f6;
+  --ocean-muted: rgba(243, 244, 246, 0.7);
+  --ocean-border: rgba(243, 244, 246, 0.12);
+  --ocean-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+
+  --bg-primary: var(--ocean-bg);
+  --bg-secondary: var(--ocean-surface);
+  --text-primary: var(--ocean-text);
+  --text-secondary: #93c5fd;
+  --border-color: var(--ocean-border);
+  --button-bg: #1d4ed8;
   --button-text: #ffffff;
 }
 
 .App {
-  text-align: center;
-  background-color: var(--bg-primary);
+  min-height: 100vh;
+  background: radial-gradient(900px 300px at 10% 0%, rgba(37, 99, 235, 0.14), transparent 60%),
+    radial-gradient(700px 260px at 90% 10%, rgba(245, 158, 11, 0.12), transparent 55%),
+    var(--bg-primary);
   color: var(--text-primary);
+  transition: background-color 0.25s ease, color 0.25s ease;
+  font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}
+
+.ocean-header {
   min-height: 100vh;
-  transition: background-color 0.3s ease, color 0.3s ease;
+  padding: 24px;
+  box-sizing: border-box;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
-}
-
-.App-header {
-  background-color: var(--bg-secondary);
-  min-height: 100vh;
+.ocean-topbar {
+  max-width: 1200px;
+  margin: 0 auto;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: var(--text-primary);
-  transition: background-color 0.3s ease;
-  position: relative;
+  justify-content: space-between;
+  gap: 16px;
 }
 
-.App-link {
-  color: var(--text-secondary);
-  transition: color 0.3s ease;
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
 }
 
-.theme-toggle {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  background-color: var(--button-bg);
-  color: var(--button-text);
-  border: none;
-  border-radius: 8px;
-  padding: 10px 20px;
-  font-size: 14px;
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(37, 99, 235, 1), rgba(245, 158, 11, 1));
+  box-shadow: var(--ocean-shadow);
+}
+
+.brand-title {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-size: 18px;
+}
+
+.brand-subtitle {
+  font-size: 13px;
+  color: var(--ocean-muted);
+  margin-top: 2px;
+}
+
+.ocean-main {
+  max-width: 1200px;
+  margin: 22px auto 0;
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 18px;
+  align-items: start;
+}
+
+.card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--ocean-radius);
+  box-shadow: var(--ocean-shadow);
+  overflow: hidden;
+}
+
+.card-header {
+  padding: 18px 18px 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.card-header h2 {
+  font-size: 16px;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.card-header p {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--ocean-muted);
+}
+
+.controls {
+  padding-bottom: 16px;
+}
+
+.field-row {
+  padding: 14px 18px 0;
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.field {
+  flex: 1;
+  min-width: 260px;
+  text-align: left;
+}
+
+.field label {
+  display: block;
+  font-size: 13px;
   font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.field input[type="file"],
+.field input[type="date"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+[data-theme="dark"] .field input[type="file"],
+[data-theme="dark"] .field input[type="date"] {
+  background: rgba(17, 24, 39, 0.25);
+}
+
+.field input:focus {
+  border-color: rgba(37, 99, 235, 0.65);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
+.hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ocean-muted);
+}
+
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+  user-select: none;
+}
+
+.radio input {
+  accent-color: var(--ocean-primary);
+}
+
+.status-row {
+  padding: 14px 18px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+}
+
+.status-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  letter-spacing: 0.08em;
+}
+
+.status-pill.ok {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+.status-pill.loading {
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.28);
+}
+
+.status-pill.error {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.28);
+}
+
+.status-text {
+  font-size: 13px;
+  color: var(--ocean-muted);
+}
+
+.actions {
+  padding: 14px 18px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.btn {
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-weight: 700;
   cursor: pointer;
-  transition: all 0.3s ease;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
 }
 
-.theme-toggle:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
-  opacity: 0.9;
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
 }
 
-.theme-toggle:active {
-  transform: translateY(0);
+.btn-primary {
+  background: linear-gradient(135deg, var(--ocean-primary), #1d4ed8);
+  color: #fff;
+  box-shadow: 0 10px 18px rgba(37, 99, 235, 0.18);
 }
 
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
+.btn-secondary {
+  background: transparent;
+  color: var(--text-primary);
+  border-color: var(--border-color);
+}
+
+.btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.preview {
+  min-height: 420px;
+}
+
+.preview-frame-wrap {
+  height: 520px;
+  padding: 12px;
+}
+
+.preview-frame {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--ocean-surface);
+}
+
+.empty-preview {
+  padding: 18px;
+  color: var(--ocean-muted);
+  font-size: 13px;
+  text-align: left;
+}
+
+.ocean-footer {
+  max-width: 1200px;
+  margin: 14px auto 0;
+  padding: 0 4px;
+}
+
+.footer-note {
+  font-size: 12px;
+  color: var(--ocean-muted);
+  text-align: left;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  font-size: 0.95em;
+}
+
+/* Responsive */
+@media (max-width: 980px) {
+  .ocean-main {
+    grid-template-columns: 1fr;
   }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* Responsive design for mobile */
-@media (max-width: 768px) {
-  .theme-toggle {
-    top: 10px;
-    right: 10px;
-    padding: 8px 16px;
-    font-size: 12px;
+  .preview-frame-wrap {
+    height: 460px;
   }
 }
