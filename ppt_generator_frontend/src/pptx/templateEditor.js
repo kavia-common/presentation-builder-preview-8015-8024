@@ -31,7 +31,13 @@ import { saveAs } from "file-saver";
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
 const STATIC_LABEL_TEXT = "TATA ELXSI";
 
-// Template-specific: the placeholder directly above the Name (verified in the bundled template).
+/**
+ * Template-specific: the placeholder directly above the "Name" row (verified in the bundled template).
+ *
+ * IMPORTANT:
+ * - We must NOT move shapes or change geometry; only replace text in the existing placeholder.
+ * - This ensures alignment/spacing exactly matches the template (and the latest screenshot reference).
+ */
 const LABEL_SHAPE_ID = "8";
 const LABEL_SHAPE_NAME = "object 8";
 
@@ -315,8 +321,10 @@ function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
   let updatedParaXml = paraXml;
 
   if (runs.length) {
-    // Replace first run's <a:t> if present; otherwise add <a:t> into the run.
+    // Replace first run's <a:t> if present; otherwise add <a:t> into the existing run.
+    // This avoids adding paragraphs/new lines that could change layout or overlap "Name".
     const firstRun = runs[0];
+
     if (/<a:t\b/.test(firstRun)) {
       const replacedRun = firstRun.replace(
         /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
@@ -332,10 +340,13 @@ function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
       updatedParaXml = paraXml.replace(firstRun, withText);
     }
   } else {
-    // Paragraph has no runs: add a minimal run before endParaRPr (or before </a:p>).
+    // Paragraph has no runs: insert a single run into the existing paragraph (no new paragraphs).
     const runXml = `<a:r><a:t>${escapeXmlText(STATIC_LABEL_TEXT)}</a:t></a:r>`;
     if (updatedParaXml.includes("<a:endParaRPr")) {
-      updatedParaXml = updatedParaXml.replace("<a:endParaRPr", `${runXml}<a:endParaRPr`);
+      updatedParaXml = updatedParaXml.replace(
+        "<a:endParaRPr",
+        `${runXml}<a:endParaRPr`
+      );
     } else {
       updatedParaXml = updatedParaXml.replace("</a:p>", `${runXml}</a:p>`);
     }
