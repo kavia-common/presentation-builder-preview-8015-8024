@@ -15,6 +15,8 @@ import { saveAs } from "file-saver";
  * - Update only the inner text of existing <a:t> nodes:
  *    - 5 date runs (day/month/year splits)
  *    - the existing label text-runs above Name (previously "TATA") updated in-place
+ * - Update ONLY paragraph properties for that existing label paragraph to match the
+ *   screenshot (centered alignment). No new shapes/paragraphs/runs are created.
  * - Do not modify any other file in the PPTX zip.
  *
  * IMPORTANT:
@@ -202,7 +204,34 @@ function replaceSlide1LabelAboveNameInShape(shapeXml, targetValue) {
     );
   }
 
-  const paragraphXml = paragraphs[paragraphIndex].xml;
+  const paragraphXmlOriginal = paragraphs[paragraphIndex].xml;
+
+  // Ensure the label paragraph is centered like the screenshot (TATA ELXSI centered above Name).
+  // IMPORTANT: We do not create a new paragraph; we only edit the existing <a:pPr> (or inject one
+  // if missing) to set algn="ctr" and keep everything else byte-identical outside <a:t> and this
+  // label paragraph’s <a:pPr>.
+  const enforceCenteredParagraph = (pXml) => {
+    const hasPPr = /<a:pPr\b/.test(pXml);
+
+    if (hasPPr) {
+      // Modify existing a:pPr tag in-place, preserving other attributes/children.
+      // If algn is already present, replace its value; otherwise inject algn="ctr" into the tag.
+      return pXml.replace(/<a:pPr\b([^>]*)>/, (full, attrs) => {
+        if (/\balgn="/.test(attrs)) {
+          const nextAttrs = attrs.replace(/\balgn="[^"]*"/, 'algn="ctr"');
+          return `<a:pPr${nextAttrs}>`;
+        }
+        return `<a:pPr${attrs} algn="ctr">`;
+      });
+    }
+
+    // No a:pPr: inject a minimal one immediately after <a:p ...>
+    // This does not create a new paragraph; it only adds paragraph properties to the existing one.
+    return pXml.replace(/<a:p\b([^>]*)>/, `<a:p$1><a:pPr algn="ctr"/>`);
+  };
+
+  const paragraphXml = enforceCenteredParagraph(paragraphXmlOriginal);
+
   const runs = collectRunsFromParagraph(paragraphXml).map((runXml) => ({
     xml: runXml,
     tText: getFirstATextFromRun(runXml),
@@ -298,9 +327,29 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
     );
   }
 
-  // 2) Non-<a:t> parts must match exactly.
-  const origParts = originalSlide1Xml.split(aTextRe);
-  const nextParts = updatedSlide1Xml.split(aTextRe);
+  // 2) Non-<a:t> parts must match exactly, EXCEPT we allow a very specific
+  // label-paragraph <a:pPr> alignment change (to center) for the "TATA" label paragraph.
+  //
+  // We implement this by normalizing both XML strings to remove/standardize:
+  // - the <a:pPr ...> inside the paragraph that contains "<a:t>TATA</a:t>"
+  // Then we compare the remaining structure parts byte-for-byte.
+  const normalizeForAllowedLabelPPr = (xml) => {
+    // Find the paragraph containing the label node by anchoring on the (pre-replacement) text.
+    // This ensures we only relax matching around the intended label paragraph properties.
+    const paraRe = /<a:p\b[\s\S]*?<\/a:p>/g;
+    const paras = xml.match(paraRe) ?? [];
+    const labelPara = paras.find((p) => p.includes("<a:t>TATA</a:t>")) ?? null;
+    if (!labelPara) return xml;
+
+    const stripped = labelPara.replace(/<a:pPr\b[\s\S]*?<\/a:pPr>/g, "");
+    return xml.replace(labelPara, stripped);
+  };
+
+  const normOrig = normalizeForAllowedLabelPPr(originalSlide1Xml);
+  const normNext = normalizeForAllowedLabelPPr(updatedSlide1Xml);
+
+  const origParts = normOrig.split(aTextRe);
+  const nextParts = normNext.split(aTextRe);
   if (origParts.length !== nextParts.length) {
     throw new Error(
       "Safety check failed: slide1.xml structure changed (unexpected <a:t> segmentation)."
@@ -309,7 +358,7 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
   for (let i = 0; i < origParts.length; i += 1) {
     if (origParts[i] !== nextParts[i]) {
       throw new Error(
-        "Safety check failed: slide1.xml changed outside <a:t> nodes. Only date/allowed text may change."
+        "Safety check failed: slide1.xml changed outside <a:t> nodes (and outside the allowed label paragraph <a:pPr>). Only date/allowed text may change."
       );
     }
   }
