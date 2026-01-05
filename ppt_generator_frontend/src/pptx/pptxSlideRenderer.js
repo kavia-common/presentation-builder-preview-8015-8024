@@ -344,6 +344,132 @@ function mimeFromZipPath(zipPath) {
 }
 
 /**
+ * Extracts raster image dimensions from bytes (PNG/JPEG only).
+ * Used to reproduce PowerPoint picture-frame behavior (aspect-ratio preserving cover + crop).
+ */
+function getRasterImageSize(bytes, zipPath) {
+  const ext = zipPath.split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "png") {
+    // PNG signature + IHDR chunk.
+    // width/height are 4-byte big-endian at offsets 16..23.
+    if (bytes.length < 24) return null;
+    const isPng =
+      bytes[0] === 0x89 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x4e &&
+      bytes[3] === 0x47 &&
+      bytes[4] === 0x0d &&
+      bytes[5] === 0x0a &&
+      bytes[6] === 0x1a &&
+      bytes[7] === 0x0a;
+    if (!isPng) return null;
+
+    const w =
+      (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+    const h =
+      (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+      return null;
+    }
+    return { width: w >>> 0, height: h >>> 0 };
+  }
+
+  if (ext === "jpg" || ext === "jpeg") {
+    // Minimal JPEG SOF parser (baseline/progressive). Walk markers until SOF0/SOF2.
+    if (bytes.length < 4) return null;
+    if (!(bytes[0] === 0xff && bytes[1] === 0xd8)) return null;
+
+    let i = 2;
+    while (i + 9 < bytes.length) {
+      if (bytes[i] !== 0xff) {
+        i += 1;
+        continue;
+      }
+
+      const marker = bytes[i + 1];
+      // Standalone markers without length.
+      if (marker === 0xd9 || marker === 0xda) break; // EOI or SOS
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+        i += 2;
+        continue;
+      }
+
+      const len = (bytes[i + 2] << 8) | bytes[i + 3];
+      if (!len || i + 2 + len > bytes.length) break;
+
+      const isSof = marker === 0xc0 || marker === 0xc2; // SOF0/SOF2
+      if (isSof) {
+        const h = (bytes[i + 5] << 8) | bytes[i + 6];
+        const w = (bytes[i + 7] << 8) | bytes[i + 8];
+        if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+          return null;
+        }
+        return { width: w, height: h };
+      }
+
+      i += 2 + len;
+    }
+    return null;
+  }
+
+  // SVG/GIF/etc: not handled; we fall back to stretch.
+  return null;
+}
+
+/**
+ * Implements a PowerPoint-like picture mapping into a destination rectangle:
+ * - maintain aspect ratio
+ * - scale to "cover" the destination (like CSS object-fit: cover)
+ * - then apply srcRect crop fractions (l/t/r/b) in source space
+ *
+ * Returns geometry for an <image> element plus a clip rect:
+ * { imgX, imgY, imgW, imgH, clipX, clipY, clipW, clipH }
+ */
+function computePptPictureCoverGeometry({ destX, destY, destW, destH, srcW, srcH, crop }) {
+  const safeSrcW = Math.max(1, Number(srcW) || 1);
+  const safeSrcH = Math.max(1, Number(srcH) || 1);
+
+  const c = crop ?? { l: 0, t: 0, r: 0, b: 0 };
+  const l = Math.max(0, Math.min(1, Number(c.l) || 0));
+  const t = Math.max(0, Math.min(1, Number(c.t) || 0));
+  const r = Math.max(0, Math.min(1, Number(c.r) || 0));
+  const b = Math.max(0, Math.min(1, Number(c.b) || 0));
+
+  const visibleSrcW = Math.max(0.0001, safeSrcW * (1 - l - r));
+  const visibleSrcH = Math.max(0.0001, safeSrcH * (1 - t - b));
+
+  // First, decide scale based on the *visible* source region to achieve cover.
+  const scale = Math.max(destW / visibleSrcW, destH / visibleSrcH);
+
+  const scaledFullW = safeSrcW * scale;
+  const scaledFullH = safeSrcH * scale;
+
+  // "Center" the visible area inside destination:
+  // visible area's top-left in scaled full image is (l*scaledFullW, t*scaledFullH)
+  // offset image so that visible area is centered into destination.
+  const visibleScaledW = visibleSrcW * scale;
+  const visibleScaledH = visibleSrcH * scale;
+
+  const extraX = (destW - visibleScaledW) / 2;
+  const extraY = (destH - visibleScaledH) / 2;
+
+  const imgX = destX + extraX - l * scaledFullW;
+  const imgY = destY + extraY - t * scaledFullH;
+
+  return {
+    imgX,
+    imgY,
+    imgW: scaledFullW,
+    imgH: scaledFullH,
+    clipX: destX,
+    clipY: destY,
+    clipW: destW,
+    clipH: destH,
+  };
+}
+
+/**
  * PUBLIC_INTERFACE
  * Returns slide indices present in the PPTX (sorted).
  *
@@ -569,14 +695,46 @@ export async function renderSlideToSvgDataUrl(pptxBytes, slideIndex, options = {
       const w = pxX(pic.cx);
       const h = pxY(pic.cy);
 
-      // Honor crop (common on the last slide background photo). We implement
-      // crop by clipping to the picture rect and scaling/offsetting the image
-      // inside to match the cropped region.
+      // PowerPoint pictures generally preserve aspect ratio and behave like a
+      // "cover" mapping within the picture frame. Using preserveAspectRatio="none"
+      // stretches (incorrect for the last slide background photo).
       //
-      // srcRect fractions represent how much is cropped from each side.
-      // visibleW = (1 - l - r), visibleH = (1 - t - b)
-      // scale image by 1/visibleW & 1/visibleH and offset by -l/-t.
-      if (pic.crop && (pic.crop.l || pic.crop.r || pic.crop.t || pic.crop.b)) {
+      // We therefore:
+      // - detect image pixel dimensions (png/jpg)
+      // - compute cover mapping in slide-space
+      // - apply srcRect crop fractions in source-space
+      // - clip to the picture frame
+      const rasterSize = getRasterImageSize(bytes, zipPath);
+
+      if (rasterSize) {
+        const geom = computePptPictureCoverGeometry({
+          destX: x,
+          destY: y,
+          destW: w,
+          destH: h,
+          srcW: rasterSize.width,
+          srcH: rasterSize.height,
+          crop: pic.crop ?? { l: 0, t: 0, r: 0, b: 0 },
+        });
+
+        const clipId = `clip_${slideIndex}_${Math.random().toString(16).slice(2)}`;
+        svgEls.push(
+          [
+            `<defs>`,
+            `<clipPath id="${clipId}">`,
+            `<rect x="${geom.clipX}" y="${geom.clipY}" width="${geom.clipW}" height="${geom.clipH}" />`,
+            `</clipPath>`,
+            `</defs>`,
+            `<image x="${geom.imgX}" y="${geom.imgY}" width="${geom.imgW}" height="${geom.imgH}"`,
+            ` href="data:${mime};base64,${b64}"`,
+            // We provide explicit x/y/width/height, so "none" is appropriate here (no extra scaling).
+            ` preserveAspectRatio="none"`,
+            ` clip-path="url(#${clipId})"`,
+            ` />`,
+          ].join("")
+        );
+      } else if (pic.crop && (pic.crop.l || pic.crop.r || pic.crop.t || pic.crop.b)) {
+        // Fallback for unknown formats: keep previous behavior (stretch + crop).
         const visibleW = Math.max(0.0001, 1 - pic.crop.l - pic.crop.r);
         const visibleH = Math.max(0.0001, 1 - pic.crop.t - pic.crop.b);
         const imgW = w / visibleW;
@@ -586,7 +744,6 @@ export async function renderSlideToSvgDataUrl(pptxBytes, slideIndex, options = {
         const dy = y - imgH * pic.crop.t;
 
         const clipId = `clip_${slideIndex}_${Math.random().toString(16).slice(2)}`;
-        // Define clip path then draw transformed image inside it.
         svgEls.push(
           [
             `<defs>`,
@@ -602,6 +759,7 @@ export async function renderSlideToSvgDataUrl(pptxBytes, slideIndex, options = {
           ].join("")
         );
       } else {
+        // Fallback: no crop info and unknown image size -> stretch to frame.
         svgEls.push(
           `<image x="${x}" y="${y}" width="${w}" height="${h}" href="data:${mime};base64,${b64}" preserveAspectRatio="none" />`
         );

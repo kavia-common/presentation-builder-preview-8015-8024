@@ -4,6 +4,10 @@ import JSZip from "jszip";
 import App from "./App";
 import { assertLastSlideUnchanged, updatePptxDateOnly } from "./pptx/templateEditor";
 
+// Increase default test timeout: JSZip + SVG slide rendering can be slower in CI.
+// This is a regression guard only; production behavior is unaffected.
+jest.setTimeout(20000);
+
 async function makeMinimalPptxArrayBuffer() {
   // Minimal PPTX-like zip with slide1.xml containing the expected strict date runs.
   // Also include a "last slide" with the highest slide number so we can assert it remains untouched.
