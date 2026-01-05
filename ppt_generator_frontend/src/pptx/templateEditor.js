@@ -14,20 +14,13 @@ import { saveAs } from "file-saver";
  *
  * Implementation approach:
  * - Read `ppt/slides/slide1.xml` as a string (do not parse/re-serialize XML).
- * - Strictly select the date text shape by stable path:
- *     <p:sp> that has:
- *       - a non-visual name cNvPr@name == "TextBox 4"
- *       - AND contains the "Date" label in its text body (secondary guard)
- * - Inside that shape, target the exact paragraph index that contains the "Date"
- *   label run, then verify the run text sequence matches the template:
- *     ["Date", " ", ":", "\u00a0 24\u00a0", "Dec", " ", "202", "5"]
+ * - Select the date text shape strictly by:
+ *    1) containing "Date</a:t>" label
+ *    2) (if multiple candidates) having the exact expected run sequence
  * - Update only the existing <a:t> node values within the 5 date runs:
  *     "\u00a0 {day}\u00a0", "{mon}", " ", "{yearHead3}", "{yearTail1}"
  *   leaving all <a:rPr> and all XML untouched.
- * - Add a verification step:
- *     Compare original vs updated slide1 XML and ensure only <a:t> text nodes
- *     under the targeted date runs changed. If any other difference is detected,
- *     abort and warn the user.
+ * - Verify slide1.xml changes occur only within those 5 <a:t> inner text ranges.
  */
 
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
@@ -88,7 +81,6 @@ function collectATextNodeRanges(xml) {
     const fullEnd = fullStart + m[0].length;
 
     const openEnd = xml.indexOf(">", fullStart);
-    // openEnd points at '>' of the opening tag
     const closeStart = xml.lastIndexOf("</a:t>", fullEnd);
     if (openEnd < 0 || closeStart < 0) continue;
 
@@ -160,7 +152,6 @@ function getShapeId(shapeXml) {
  * Collect all paragraph blocks (<a:p>...</a:p>) within a shape text body.
  */
 function collectParagraphsFromShape(shapeXml) {
-  // Narrow to the text body if present to avoid accidentally matching elsewhere.
   const bodyMatch = shapeXml.match(/<p:txBody\b[\s\S]*?<\/p:txBody>/);
   const scope = bodyMatch ? bodyMatch[0] : shapeXml;
 
@@ -175,7 +166,11 @@ function collectParagraphsFromShape(shapeXml) {
     });
   }
 
-  return { scopeXml: scope, scopeOffset: bodyMatch ? shapeXml.indexOf(scope) : 0, paragraphs };
+  return {
+    scopeXml: scope,
+    scopeOffset: bodyMatch ? shapeXml.indexOf(scope) : 0,
+    paragraphs,
+  };
 }
 
 /**
@@ -206,15 +201,6 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
 
   const slide1Xml = await slide1File.async("string");
 
-  // ---- Strict selection of the date shape by stable id/path (template known) ----
-  // IMPORTANT:
-  // Different PPTX exports use different cNvPr@name values (e.g. "TextBox 4" vs "object 15").
-  // We must still be strict, but cannot hardcode a single name if the shipped template differs.
-  //
-  // Selection strategy:
-  // 1) Find shapes that contain the "Date</a:t>" label in their text body (must be present).
-  // 2) If multiple candidates exist, pick the one whose date paragraph has the exact expected run
-  //    sequence (same strict run guard already enforced below).
   const shapes = collectShapeBlocks(slide1Xml);
   const dateLabelCandidates = shapes.filter((s) => s.xml.includes("Date</a:t>"));
 
@@ -224,22 +210,11 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     );
   }
 
-  // Prefer a single candidate, otherwise disambiguate by checking for the expected run pattern.
   let shape = null;
   if (dateLabelCandidates.length === 1) {
     shape = dateLabelCandidates[0];
   } else {
-    // Try to find the candidate whose "Date" paragraph contains the exact template run sequence.
-    const expectedRunTexts = [
-      "Date",
-      " ",
-      ":",
-      "\  24\ ",
-      "Dec",
-      " ",
-      "202",
-      "5",
-    ];
+    const expectedRunTexts = ["Date", " ", ":", "\u00a0 24\u00a0", "Dec", " ", "202", "5"];
 
     const matchesExpectedRuns = (shapeXml) => {
       const { paragraphs } = collectParagraphsFromShape(shapeXml);
@@ -248,7 +223,8 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
 
       const runs = collectRunsFromParagraph(p.xml).map((runXml) => ({
         tText: getFirstATextFromRun(runXml),
-        hasText: /<a:t\\b/.test(runXml),
+        // CRITICAL FIX: use `<a:t\b` (word boundary), not `<a:t\\b` (literal backslash+b)
+        hasText: /<a:t\b/.test(runXml),
       }));
 
       const actualRunTexts = runs.map((r) => (r.hasText ? r.tText : null));
@@ -275,13 +251,11 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const shapeName = getShapeName(shape.xml) ?? "unknown";
   const shapeId = getShapeId(shape.xml) ?? "unknown";
 
-  // ---- Strict paragraph selection inside the shape ----
   const { scopeXml, scopeOffset, paragraphs } = collectParagraphsFromShape(shape.xml);
   if (!paragraphs.length) {
     throw new Error("Strict template mismatch: date shape contains no paragraphs.");
   }
 
-  // Find the paragraph that contains the "Date" label exactly.
   const paragraphIndex = paragraphs.findIndex((p) => p.xml.includes("Date</a:t>"));
   if (paragraphIndex < 0) {
     throw new Error('Strict template mismatch: could not find "Date" paragraph inside date shape.');
@@ -294,16 +268,11 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     hasText: /<a:t\b/.test(runXml),
   }));
 
-  // Enforce exact run sequence within the paragraph as in the template.
   const expectedRunTexts = ["Date", " ", ":", "\u00a0 24\u00a0", "Dec", " ", "202", "5"];
   const actualRunTexts = runs.map((r) => (r.hasText ? r.tText : null));
 
-  // We require the run sequence to appear exactly and contiguously (starting at index 0).
-  // This keeps the targeting stable and prevents accidental edits elsewhere.
   const sameLength = actualRunTexts.length === expectedRunTexts.length;
-  const matches =
-    sameLength &&
-    actualRunTexts.every((v, i) => v === expectedRunTexts[i]);
+  const matches = sameLength && actualRunTexts.every((v, i) => v === expectedRunTexts[i]);
 
   if (!matches) {
     throw new Error(
@@ -311,24 +280,16 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     );
   }
 
-  // Compute replacement texts for the five date value runs (indexes 3..7).
   const [day, mon, year] = formattedDate.split(" ");
   const y = String(year);
   const yHead = y.slice(0, 3);
   const yTail = y.slice(3);
 
-  const replacements = [
-    `\u00a0 ${day}\u00a0`, // preserve NBSP padding pattern EXACTLY
-    mon,
-    " ",
-    yHead,
-    yTail,
-  ].map(escapeXmlText);
+  const replacements = [`\u00a0 ${day}\u00a0`, mon, " ", yHead, yTail].map(escapeXmlText);
 
-  const dateRunIndexes = [3, 4, 5, 6, 7]; // within this paragraph's runs
+  const dateRunIndexes = [3, 4, 5, 6, 7];
   const updatedRunsXml = runs.map((r) => r.xml);
 
-  // Replace only inner text of the first <a:t> for each targeted run.
   for (let i = 0; i < dateRunIndexes.length; i += 1) {
     const idx = dateRunIndexes[i];
     const newText = replacements[i];
@@ -339,7 +300,6 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     );
   }
 
-  // Rebuild paragraph by replacing only the run region (keep wrapper bytes intact).
   const firstRunIdx = paragraphXml.search(/<a:r\b/);
   const lastRunEnd = paragraphXml.lastIndexOf("</a:r>");
   if (firstRunIdx < 0 || lastRunEnd < 0) {
@@ -350,14 +310,11 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const pTail = paragraphXml.slice(runRegionEnd);
   const updatedParagraphXml = `${pHead}${updatedRunsXml.join("")}${pTail}`;
 
-  // Rebuild shape text body scope, then shape, then slide XML.
   const paraStartInScope = paragraphs[paragraphIndex].startInScope;
   const paraEndInScope = paragraphs[paragraphIndex].endInScope;
 
   const updatedScopeXml =
-    scopeXml.slice(0, paraStartInScope) +
-    updatedParagraphXml +
-    scopeXml.slice(paraEndInScope);
+    scopeXml.slice(0, paraStartInScope) + updatedParagraphXml + scopeXml.slice(paraEndInScope);
 
   const updatedShapeXml =
     shape.xml.slice(0, scopeOffset) +
@@ -365,38 +322,28 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     shape.xml.slice(scopeOffset + scopeXml.length);
 
   const updatedSlide1Xml =
-    slide1Xml.slice(0, shape.start) +
-    updatedShapeXml +
-    slide1Xml.slice(shape.end);
+    slide1Xml.slice(0, shape.start) + updatedShapeXml + slide1Xml.slice(shape.end);
 
-  // ---- SAFEGUARD: verify only allowed <a:t> text nodes changed ----
   verifyOnlyAllowedSlide1Diffs({
     originalSlide1Xml: slide1Xml,
     updatedSlide1Xml,
-    shapeAbsoluteStart: shape.start,
-    // Allowed changes are exactly the inner text ranges of the 5 targeted runs' first <a:t>
-    // within the updated paragraph.
     allowedChangedATextInnerRangesInUpdated: computeAllowedATextInnerRangesInUpdatedParagraph(
       updatedParagraphXml,
       dateRunIndexes
     ).map((r) => ({
-      // translate from paragraph-local to slide1-absolute coordinates in UPDATED slide xml
       start: shape.start + (scopeOffset + (paraStartInScope + r.innerStartWithinParagraphShifted)),
       end: shape.start + (scopeOffset + (paraStartInScope + r.innerEndWithinParagraphShifted)),
     })),
   });
 
-  // This is the only mutation in the whole PPTX.
   zip.file(SLIDE1_PATH, updatedSlide1Xml);
 
-  // IMPORTANT: We do not touch any other ZIP entries (slides, rels, media, etc.).
-  // This preserves the last slide and all other content exactly.
   const out = await zip.generateAsync({ type: "uint8array" });
 
   return {
     updatedPptxBytes: out,
     detected: {
-      mode: "strict-template/date-shape-by-name+diff-guard",
+      mode: "strict-template/date-shape-by-label+diff-guard",
       slidePath: SLIDE1_PATH,
       shapeName,
       shapeId,
@@ -433,10 +380,8 @@ function computeAllowedATextInnerRangesInUpdatedParagraph(updatedParagraphXml, d
     if (!runTextRanges.length) {
       throw new Error("Strict template mismatch: expected <a:t> in targeted date run.");
     }
-    // Allow only the FIRST <a:t> inner text in the run.
     const first = runTextRanges[0];
 
-    // Translate run-local to paragraph-local offsets.
     allowed.push({
       innerStartWithinParagraphShifted: run.start + first.innerStart,
       innerEndWithinParagraphShifted: run.start + first.innerEnd,
@@ -461,13 +406,9 @@ function verifyOnlyAllowedSlide1Diffs({
 
   const maxLen = Math.max(originalSlide1Xml.length, updatedSlide1Xml.length);
 
-  // Convert allowed ranges into a fast "is allowed pos" predicate.
-  // We treat allowed ranges as [start, end) on updatedSlide1Xml positions.
   const isAllowedPos = (pos) =>
     allowedChangedATextInnerRangesInUpdated.some((r) => pos >= r.start && pos < r.end);
 
-  // Walk strings and ensure all diffs only occur in allowed <a:t> inner text areas.
-  // Note: this is strict; if length shifts occur outside allowed ranges, it will fail.
   let i = 0;
   while (i < maxLen) {
     const a = originalSlide1Xml[i];
@@ -478,8 +419,6 @@ function verifyOnlyAllowedSlide1Diffs({
       continue;
     }
 
-    // If one string ends early, treat remaining as differences.
-    // These must still be inside allowed ranges, otherwise fail.
     if (i >= originalSlide1Xml.length || i >= updatedSlide1Xml.length) {
       if (!isAllowedPos(i)) {
         throw new Error(
@@ -490,9 +429,7 @@ function verifyOnlyAllowedSlide1Diffs({
       continue;
     }
 
-    // For a mismatch at i, it must be inside allowed ranges.
     if (!isAllowedPos(i)) {
-      // Provide a small context snippet to aid debugging.
       const ctxStart = Math.max(0, i - 40);
       const ctxEnd = Math.min(updatedSlide1Xml.length, i + 80);
       const ctx = updatedSlide1Xml.slice(ctxStart, ctxEnd);
@@ -520,7 +457,7 @@ export function downloadPptxBytes(pptxBytes, filename) {
 
 /**
  * PUBLIC_INTERFACE
- * Creates an object URL suitable for embedding an Office preview iframe.
+ * Creates an object URL suitable for embedding an Office preview iframe/object.
  * @param {Uint8Array} pptxBytes
  */
 export function createPptxObjectUrl(pptxBytes) {
@@ -537,4 +474,50 @@ export function createPptxObjectUrl(pptxBytes) {
 export function todayIsoDate() {
   const d = new Date();
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * Verifies the strict invariant: the last slide XML must remain byte-for-byte identical
+ * between the original template PPTX and the updated PPTX output.
+ *
+ * NOTE: We compare the raw bytes of the ZIP entry `ppt/slides/slide14.xml` because
+ * the shipped template currently has 14 slides. If the template changes, update
+ * this constant accordingly.
+ *
+ * @param {ArrayBuffer} originalPptxArrayBuffer
+ * @param {Uint8Array} updatedPptxBytes
+ * @returns {Promise<boolean>} true if unchanged, else throws Error
+ */
+export async function assertLastSlideUnchanged(originalPptxArrayBuffer, updatedPptxBytes) {
+  const LAST_SLIDE_PATH = "ppt/slides/slide14.xml";
+
+  const originalZip = await JSZip.loadAsync(originalPptxArrayBuffer);
+  const updatedZip = await JSZip.loadAsync(updatedPptxBytes);
+
+  const orig = originalZip.file(LAST_SLIDE_PATH);
+  const next = updatedZip.file(LAST_SLIDE_PATH);
+
+  if (!orig || !next) {
+    throw new Error(
+      `Invariant check failed: missing ${LAST_SLIDE_PATH} in ${!orig ? "original" : "updated"} PPTX.`
+    );
+  }
+
+  const [origBytes, nextBytes] = await Promise.all([
+    orig.async("uint8array"),
+    next.async("uint8array"),
+  ]);
+
+  if (origBytes.length !== nextBytes.length) {
+    throw new Error("Invariant check failed: last slide byte length changed.");
+  }
+
+  for (let i = 0; i < origBytes.length; i += 1) {
+    if (origBytes[i] !== nextBytes[i]) {
+      throw new Error(`Invariant check failed: last slide bytes differ at offset ${i}.`);
+    }
+  }
+
+  return true;
 }

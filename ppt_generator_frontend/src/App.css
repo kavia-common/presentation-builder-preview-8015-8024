@@ -274,9 +274,35 @@
 .preview-frame-wrap {
   height: 520px;
   padding: 12px;
+  display: grid;
+  grid-template-rows: 1fr;
+  gap: 12px;
+}
+
+.pptx-preview {
+  padding: 0;
+}
+
+.preview-toolbar {
+  padding: 12px 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
 }
 
 .preview-frame {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--ocean-surface);
+}
+
+/* Secondary embed attempt; kept hidden by default to avoid double-scroll noise,
+   but still available to browsers that might prefer <object>. */
+.preview-object {
+  display: none;
   width: 100%;
   height: 100%;
   border: 1px solid var(--border-color);

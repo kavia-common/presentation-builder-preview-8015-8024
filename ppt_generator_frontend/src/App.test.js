@@ -1,30 +1,57 @@
 import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import JSZip from "jszip";
 import App from "./App";
+import { assertLastSlideUnchanged, updatePptxDateOnly } from "./pptx/templateEditor";
 
-function mockArrayBuffer(bytes = [1, 2, 3]) {
-  const arr = new Uint8Array(bytes);
-  return arr.buffer;
+async function makeMinimalPptxArrayBuffer() {
+  // Minimal PPTX-like zip with slide1.xml containing the expected strict date runs.
+  // Also include slide14.xml so we can assert it remains untouched.
+  const zip = new JSZip();
+
+  zip.file(
+    "ppt/slides/slide1.xml",
+    [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">',
+      "<p:cSld><p:spTree>",
+      '<p:sp><p:nvSpPr><p:cNvPr id="1" name="TextBox 4"/></p:nvSpPr><p:txBody>',
+      "<a:p>",
+      "<a:r><a:t>Date</a:t></a:r>",
+      "<a:r><a:t> </a:t></a:r>",
+      "<a:r><a:t>:</a:t></a:r>",
+      "<a:r><a:t>\u00a0 24\u00a0</a:t></a:r>",
+      "<a:r><a:t>Dec</a:t></a:r>",
+      "<a:r><a:t> </a:t></a:r>",
+      "<a:r><a:t>202</a:t></a:r>",
+      "<a:r><a:t>5</a:t></a:r>",
+      "</a:p>",
+      "</p:txBody></p:sp>",
+      "</p:spTree></p:cSld>",
+      "</p:sld>",
+    ].join("")
+  );
+
+  zip.file("ppt/slides/slide14.xml", "<last-slide>DO NOT TOUCH</last-slide>");
+
+  const bytes = await zip.generateAsync({ type: "uint8array" });
+  return bytes.buffer;
 }
 
 describe("PPTX preview regeneration", () => {
   test("changing the date regenerates the blob URL and refreshes the preview iframe src", async () => {
-    // Mock fetch for /assets/template.pptx
     global.fetch = jest.fn(async () => ({
       ok: true,
-      arrayBuffer: async () => mockArrayBuffer([7, 7, 7, 7]),
+      arrayBuffer: async () => await makeMinimalPptxArrayBuffer(),
     }));
 
     render(<App />);
 
-    // Wait for initial preview iframe to appear (template loaded + first generation).
     const iframe = await screen.findByTitle("PPTX Preview");
-
     const firstSrc = iframe.getAttribute("src");
     expect(firstSrc).toBeTruthy();
 
     const dateInput = screen.getByLabelText("Slide 1 Date");
-    // Change date -> should trigger regeneration and assign a new blob URL.
     fireEvent.change(dateInput, { target: { value: "2026-01-06" } });
 
     await waitFor(() => {
@@ -33,5 +60,11 @@ describe("PPTX preview regeneration", () => {
       expect(nextSrc).toBeTruthy();
       expect(nextSrc).not.toEqual(firstSrc);
     });
+  });
+
+  test("strict invariant: last slide remains byte-for-byte unchanged", async () => {
+    const template = await makeMinimalPptxArrayBuffer();
+    const { updatedPptxBytes } = await updatePptxDateOnly(template, "2026-01-06");
+    await expect(assertLastSlideUnchanged(template, updatedPptxBytes)).resolves.toEqual(true);
   });
 });

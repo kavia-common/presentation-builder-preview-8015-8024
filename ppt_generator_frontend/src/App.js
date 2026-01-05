@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
+import PptxPreview from "./pptx/PptxPreview";
 import {
   createPptxObjectUrl,
   downloadPptxBytes,
@@ -243,28 +244,17 @@ function App() {
             <div className="card-header">
               <h2>Preview</h2>
               <p>
-                Browser preview support for PPTX varies. This embeds the generated
-                PPTX as a blob URL. If your browser cannot render it, use Download.
+                Most browsers don’t natively render PPTX inline. We attempt an embedded preview,
+                and always provide a “Download / Open” fallback so you never get a blank preview.
               </p>
             </div>
 
-            {previewUrl ? (
-              <div className="preview-frame-wrap">
-                {/* Many browsers won't natively render PPTX; still provides a consistent "preview area".
-                   If unsupported, user will see a download prompt or blank frame. */}
-                <iframe
-                  key={previewKey}
-                  title="PPTX Preview"
-                  className="preview-frame"
-                  src={previewUrl}
-                />
-              </div>
-            ) : (
-              <div className="empty-preview">
-                Preview will appear here once the template is loaded and the PPTX
-                is generated.
-              </div>
-            )}
+            <PptxPreview
+              key={previewKey}
+              url={previewUrl}
+              filename={generatedBytes ? `Updated_Template_${dateISO}.pptx` : "Updated_Template.pptx"}
+              debug={String(process.env.REACT_APP_LOG_LEVEL || "").toLowerCase() === "debug"}
+            />
           </section>
         </main>
 
