@@ -18,6 +18,7 @@ function App() {
 
   const [generatedBytes, setGeneratedBytes] = useState(null); // Uint8Array
   const [previewUrl, setPreviewUrl] = useState("");
+  const [previewKey, setPreviewKey] = useState(0);
   const [status, setStatus] = useState({ kind: "idle", message: "" });
   const [detectionInfo, setDetectionInfo] = useState(null);
 
@@ -81,11 +82,18 @@ function App() {
           setGeneratedBytes(updatedPptxBytes);
           setDetectionInfo(detected);
 
-          // Refresh preview URL: changing the URL forces the iframe to load the new PPTX blob.
+          // Refresh preview URL:
+          // - Create a new blob URL every time, so the iframe has a new resource to load.
+          // - Revoke the previous URL *after* React commits the new src to avoid revoking
+          //   too early (some browsers can behave oddly if the old blob is revoked immediately).
+          const nextUrl = createPptxObjectUrl(updatedPptxBytes);
           setPreviewUrl((prev) => {
-            if (prev) URL.revokeObjectURL(prev);
-            return createPptxObjectUrl(updatedPptxBytes);
+            if (prev) {
+              window.setTimeout(() => URL.revokeObjectURL(prev), 0);
+            }
+            return nextUrl;
           });
+          setPreviewKey((k) => k + 1);
 
           setStatus({ kind: "ready", message: "Preview updated." });
         } catch (e) {
@@ -94,7 +102,7 @@ function App() {
           setGeneratedBytes(null);
           setDetectionInfo(null);
           setPreviewUrl((prev) => {
-            if (prev) URL.revokeObjectURL(prev);
+            if (prev) window.setTimeout(() => URL.revokeObjectURL(prev), 0);
             return "";
           });
 
@@ -245,6 +253,7 @@ function App() {
                 {/* Many browsers won't natively render PPTX; still provides a consistent "preview area".
                    If unsupported, user will see a download prompt or blank frame. */}
                 <iframe
+                  key={previewKey}
                   title="PPTX Preview"
                   className="preview-frame"
                   src={previewUrl}

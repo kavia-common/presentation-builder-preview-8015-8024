@@ -207,27 +207,71 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const slide1Xml = await slide1File.async("string");
 
   // ---- Strict selection of the date shape by stable id/path (template known) ----
-  // Primary stable selector: shape name == "TextBox 4"
-  // Secondary guard: must contain "Date</a:t>" in its text.
+  // IMPORTANT:
+  // Different PPTX exports use different cNvPr@name values (e.g. "TextBox 4" vs "object 15").
+  // We must still be strict, but cannot hardcode a single name if the shipped template differs.
+  //
+  // Selection strategy:
+  // 1) Find shapes that contain the "Date</a:t>" label in their text body (must be present).
+  // 2) If multiple candidates exist, pick the one whose date paragraph has the exact expected run
+  //    sequence (same strict run guard already enforced below).
   const shapes = collectShapeBlocks(slide1Xml);
-  const candidates = shapes.filter((s) => {
-    const name = getShapeName(s.xml);
-    if (name !== "TextBox 4") return false;
-    return s.xml.includes("Date</a:t>");
-  });
+  const dateLabelCandidates = shapes.filter((s) => s.xml.includes("Date</a:t>"));
 
-  if (candidates.length !== 1) {
-    const names = shapes
-      .map((s) => getShapeName(s.xml))
-      .filter(Boolean)
-      .slice(0, 10)
-      .join(", ");
+  if (dateLabelCandidates.length < 1) {
     throw new Error(
-      `Strict template mismatch: expected exactly 1 date shape (name="TextBox 4" containing "Date"), found ${candidates.length}. Available names (first 10): ${names}`
+      'Strict template mismatch: could not find any shape containing the "Date" label.'
     );
   }
 
-  const shape = candidates[0];
+  // Prefer a single candidate, otherwise disambiguate by checking for the expected run pattern.
+  let shape = null;
+  if (dateLabelCandidates.length === 1) {
+    shape = dateLabelCandidates[0];
+  } else {
+    // Try to find the candidate whose "Date" paragraph contains the exact template run sequence.
+    const expectedRunTexts = [
+      "Date",
+      " ",
+      ":",
+      "\  24\ ",
+      "Dec",
+      " ",
+      "202",
+      "5",
+    ];
+
+    const matchesExpectedRuns = (shapeXml) => {
+      const { paragraphs } = collectParagraphsFromShape(shapeXml);
+      const p = paragraphs.find((x) => x.xml.includes("Date</a:t>"));
+      if (!p) return false;
+
+      const runs = collectRunsFromParagraph(p.xml).map((runXml) => ({
+        tText: getFirstATextFromRun(runXml),
+        hasText: /<a:t\\b/.test(runXml),
+      }));
+
+      const actualRunTexts = runs.map((r) => (r.hasText ? r.tText : null));
+      return (
+        actualRunTexts.length === expectedRunTexts.length &&
+        actualRunTexts.every((v, i) => v === expectedRunTexts[i])
+      );
+    };
+
+    shape = dateLabelCandidates.find((c) => matchesExpectedRuns(c.xml)) ?? null;
+  }
+
+  if (!shape) {
+    const names = shapes
+      .map((s) => getShapeName(s.xml))
+      .filter(Boolean)
+      .slice(0, 15)
+      .join(", ");
+    throw new Error(
+      `Strict template mismatch: multiple "Date" label candidates and none matched the expected run pattern. Available names (first 15): ${names}`
+    );
+  }
+
   const shapeName = getShapeName(shape.xml) ?? "unknown";
   const shapeId = getShapeId(shape.xml) ?? "unknown";
 
