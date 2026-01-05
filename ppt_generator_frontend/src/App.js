@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import {
   createPptxObjectUrl,
@@ -54,53 +54,66 @@ function App() {
     };
   }, []);
 
-  // Regenerate PPTX any time date or template changes
+  // Regenerate PPTX any time date or template changes.
+  // Debounced to keep typing/rapid changes smooth, while still updating "immediately"
+  // after the user input settles (lightweight in-memory mutation of slide1 only).
+  const regenSeqRef = useRef(0);
   useEffect(() => {
+    if (!templateBytes) return () => {};
+
+    const seq = (regenSeqRef.current += 1);
     let cancelled = false;
 
-    async function regenerate() {
-      if (!templateBytes) return;
+    const DEBOUNCE_MS = 150;
+    const timeoutId = window.setTimeout(() => {
+      async function regenerate() {
+        try {
+          setStatus({ kind: "loading", message: "Generating preview (date only)…" });
 
-      try {
-        setStatus({ kind: "loading", message: "Generating preview (date only)…" });
-        const { updatedPptxBytes, detected } = await updatePptxDateOnly(
-          templateBytes,
-          dateISO
-        );
-        if (cancelled) return;
+          const { updatedPptxBytes, detected } = await updatePptxDateOnly(
+            templateBytes,
+            dateISO
+          );
 
-        setGeneratedBytes(updatedPptxBytes);
-        setDetectionInfo(detected);
+          // Ignore out-of-date results (date changed again while we were generating).
+          if (cancelled || regenSeqRef.current !== seq) return;
 
-        // Refresh preview URL
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return createPptxObjectUrl(updatedPptxBytes);
-        });
+          setGeneratedBytes(updatedPptxBytes);
+          setDetectionInfo(detected);
 
-        setStatus({ kind: "ready", message: "Preview updated." });
-      } catch (e) {
-        if (cancelled) return;
-        setGeneratedBytes(null);
-        setDetectionInfo(null);
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return "";
-        });
-        setStatus({
-          kind: "error",
-          message:
-            e instanceof Error
-              ? e.message
-              : "Failed to generate PPTX preview.",
-        });
+          // Refresh preview URL: changing the URL forces the iframe to load the new PPTX blob.
+          setPreviewUrl((prev) => {
+            if (prev) URL.revokeObjectURL(prev);
+            return createPptxObjectUrl(updatedPptxBytes);
+          });
+
+          setStatus({ kind: "ready", message: "Preview updated." });
+        } catch (e) {
+          if (cancelled || regenSeqRef.current !== seq) return;
+
+          setGeneratedBytes(null);
+          setDetectionInfo(null);
+          setPreviewUrl((prev) => {
+            if (prev) URL.revokeObjectURL(prev);
+            return "";
+          });
+
+          setStatus({
+            kind: "error",
+            message:
+              e instanceof Error
+                ? e.message
+                : "Failed to generate PPTX preview.",
+          });
+        }
       }
-    }
 
-    regenerate();
+      regenerate();
+    }, DEBOUNCE_MS);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timeoutId);
     };
   }, [templateBytes, dateISO]);
 
