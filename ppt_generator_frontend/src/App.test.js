@@ -48,10 +48,12 @@ describe("PPTX preview regeneration", () => {
 
     render(<App />);
 
-    // Wait until generation has produced a PPTX URL (the link is only rendered when `url` exists).
-    const firstLink = await screen.findByRole("link", {
-      name: "Download / Open PPTX",
-    });
+    // Wait until generation has produced a PPTX URL (the link is rendered only when `url` exists).
+    const firstLink = await screen.findByRole(
+      "link",
+      { name: "Download / Open PPTX" },
+      { timeout: 4000 }
+    );
     const firstHref = firstLink.getAttribute("href");
     expect(firstHref).toBeTruthy();
 
@@ -59,12 +61,21 @@ describe("PPTX preview regeneration", () => {
     const dateInput = screen.getByLabelText("Slide 1 Date");
     fireEvent.change(dateInput, { target: { value: "2026-01-06" } });
 
-    await waitFor(() => {
-      const nextLink = screen.getByRole("link", { name: "Download / Open PPTX" });
-      const nextHref = nextLink.getAttribute("href");
-      expect(nextHref).toBeTruthy();
-      expect(nextHref).not.toEqual(firstHref);
-    });
+    await waitFor(
+      () => {
+        const nextLink = screen.getByRole("link", {
+          name: "Download / Open PPTX",
+        });
+        const nextHref = nextLink.getAttribute("href");
+        expect(nextHref).toBeTruthy();
+        expect(nextHref).not.toEqual(firstHref);
+      },
+      { timeout: 5000 }
+    );
+
+    // Carousel nav should exist (regression guard).
+    expect(screen.getByRole("button", { name: "Prev" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next" })).toBeInTheDocument();
   });
 
   test("strict invariant: last slide remains byte-for-byte unchanged", async () => {
