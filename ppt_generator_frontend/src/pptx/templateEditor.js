@@ -4,11 +4,10 @@ import { saveAs } from "file-saver";
 /**
  * STRICT TEMPLATE RULES (user requirements):
  * - The app ships with a built-in PPTX: `public/assets/template.pptx`.
- * - Slide 1 must remain byte-for-byte identical to the template EXCEPT for the
- *   date text content.
- * - The date text remains editable, but its formatting, runs, position, and
- *   layout must remain unchanged.
- * - Do not modify any other elements or slide XML parts.
+ * - Slide 1 must remain byte-for-byte identical to the template EXCEPT for:
+ *    (a) the date text content, AND
+ *    (b) adding the non-editable label "TATA ELXSI" above the Name (Slide 1 only).
+ * - Only the date text on Slide 1 is editable (i.e., changes across generations).
  * - Preserve the last slide exactly with no processing: we therefore do not
  *   modify any files except `ppt/slides/slide1.xml`.
  *
@@ -17,13 +16,22 @@ import { saveAs } from "file-saver";
  * - Select the date text shape strictly by:
  *    1) containing "Date</a:t>" label
  *    2) (if multiple candidates) having the exact expected run sequence
- * - Update only the existing <a:t> node values within the 5 date runs:
- *     "\u00a0 {day}\u00a0", "{mon}", " ", "{yearHead3}", "{yearTail1}"
- *   leaving all <a:rPr> and all XML untouched.
- * - Verify slide1.xml changes occur only within those 5 <a:t> nodes (node-based guard).
+ * - Select the Name text shape strictly by:
+ *    1) containing "Name</a:t>" and the known name value in the template ("Subrata")
+ * - Update only:
+ *    - Insert a new first paragraph into the Name shape: "TATA ELXSI"
+ *      using the existing shape's paragraph/run properties (formatting identical),
+ *      and without changing any other bytes in slide1.xml.
+ *    - Update only the existing <a:t> node values within the 5 date runs
+ *      leaving all <a:rPr> and all XML untouched.
+ *
+ * - Verify slide1.xml changes occur only within:
+ *    - the inserted Name paragraph (exact insertion point), and
+ *    - the 5 intended date <a:t> nodes (node-based guard).
  */
 
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
+const STATIC_LABEL_TEXT = "TATA ELXSI";
 
 /**
  * PUBLIC_INTERFACE
@@ -31,6 +39,7 @@ const SLIDE1_PATH = "ppt/slides/slide1.xml";
  * @returns {Promise<ArrayBuffer>} PPTX bytes
  */
 export async function fetchBundledTemplatePptx() {
+  /** This is a public function. */
   const res = await fetch("/assets/template.pptx", { cache: "no-store" });
   if (!res.ok) {
     throw new Error(
@@ -69,7 +78,7 @@ function formatDateForTemplate(dateInput) {
 }
 
 function escapeXmlText(text) {
-  return text
+  return String(text ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -260,19 +269,100 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
 }
 
 /**
+ * Inserts a static first paragraph into the Name shape, if not already present.
+ * This is a byte-preserving string insertion that does not change existing XML.
+ *
+ * IMPORTANT:
+ * - We do NOT alter any existing paragraphs/runs; we only insert a new <a:p> before them.
+ * - We reuse the first paragraph's <a:pPr> and first run's <a:rPr> for identical formatting.
+ */
+function addStaticLabelAboveName({ slide1Xml }) {
+  const shapes = collectShapeBlocks(slide1Xml);
+
+  // Strictly identify the Name shape by its known template contents.
+  const nameShapeCandidates = shapes.filter(
+    (s) => s.xml.includes("Name</a:t>") && s.xml.includes("Subrata</a:t>")
+  );
+
+  if (nameShapeCandidates.length !== 1) {
+    throw new Error(
+      `Strict template mismatch: expected exactly 1 Name shape (by 'Name' + 'Subrata'), found ${nameShapeCandidates.length}.`
+    );
+  }
+
+  const shape = nameShapeCandidates[0];
+
+  // If the static label already exists, do nothing.
+  if (shape.xml.includes(`>${STATIC_LABEL_TEXT}<`)) {
+    return { updatedSlide1Xml: slide1Xml, changed: false };
+  }
+
+  const { scopeXml, scopeOffset, paragraphs } = collectParagraphsFromShape(shape.xml);
+  if (!paragraphs.length) {
+    throw new Error("Strict template mismatch: Name shape contains no paragraphs.");
+  }
+
+  const firstParaXml = paragraphs[0].xml;
+
+  // Reuse pPr and rPr from the first paragraph/run to preserve formatting.
+  const pPrOpen = firstParaXml.match(/<a:pPr\b[^>]*>/)?.[0] ?? "<a:pPr>";
+  const pPrClose = firstParaXml.includes("</a:pPr>") ? "</a:pPr>" : "";
+  const pPrBlock = `${pPrOpen}${pPrClose}`;
+
+  const firstRunXml = collectRunsFromParagraph(firstParaXml)[0];
+  if (!firstRunXml) {
+    throw new Error("Strict template mismatch: Name paragraph has no runs.");
+  }
+
+  const rPrOpen = firstRunXml.match(/<a:rPr\b[^>]*>/)?.[0] ?? "<a:rPr>";
+  const rPrClose = firstRunXml.includes("</a:rPr>") ? "</a:rPr>" : "";
+  const rPrInner =
+    firstRunXml.match(/<a:rPr\b[^>]*>[\s\S]*?<\/a:rPr>/)?.[0] ?? `${rPrOpen}${rPrClose}`;
+
+  // Construct new paragraph with same formatting. Keep it minimal to avoid any layout shifts.
+  const newPara =
+    `<a:p>` +
+    `${pPrBlock}` +
+    `<a:r>` +
+    `${rPrInner}` +
+    `<a:t>${escapeXmlText(STATIC_LABEL_TEXT)}</a:t>` +
+    `</a:r>` +
+    `</a:p>`;
+
+  // Insert new paragraph at the start of the text body paragraph list.
+  const insertAt = paragraphs[0].startInScope;
+  const updatedScopeXml =
+    scopeXml.slice(0, insertAt) + newPara + scopeXml.slice(insertAt);
+
+  const updatedShapeXml =
+    shape.xml.slice(0, scopeOffset) +
+    updatedScopeXml +
+    shape.xml.slice(scopeOffset + scopeXml.length);
+
+  const updatedSlide1Xml =
+    slide1Xml.slice(0, shape.start) + updatedShapeXml + slide1Xml.slice(shape.end);
+
+  return { updatedSlide1Xml, changed: true };
+}
+
+/**
  * PUBLIC_INTERFACE
  * Updates ONLY the date field on slide 1 for the shipped default template,
- * keeping all other slides/files untouched (including the last slide).
+ * while also ensuring "TATA ELXSI" exists above the Name (Slide 1).
  *
  * Guarantees:
- * - slide1.xml is identical except for the targeted date <a:t> nodes.
+ * - slide1.xml is identical except for:
+ *    - the inserted static label paragraph in the Name shape (if missing), and
+ *    - the targeted date <a:t> nodes.
  * - Does not alter any <a:rPr>, paragraph properties, shape geometry, or layout.
+ * - Does not change any other files; last slide stays byte-identical.
  *
  * @param {ArrayBuffer} pptxArrayBuffer
  * @param {string} dateISO - value from <input type="date">
  * @returns {Promise<{updatedPptxBytes: Uint8Array, detected: {mode: string, slidePath: string, shapeName: string, shapeId: string}}>}
  */
 export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
+  /** This is a public function. */
   const formattedDate = formatDateForTemplate(dateISO);
   if (!formattedDate) {
     throw new Error("Invalid date.");
@@ -285,9 +375,14 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     throw new Error(`Template missing expected file: ${SLIDE1_PATH}`);
   }
 
-  const slide1Xml = await slide1File.async("string");
+  const slide1XmlOriginal = await slide1File.async("string");
 
-  const shapes = collectShapeBlocks(slide1Xml);
+  // Step 0: ensure the static label exists above Name (in slide1.xml only).
+  const labelResult = addStaticLabelAboveName({ slide1Xml: slide1XmlOriginal });
+  const slide1XmlWithLabel = labelResult.updatedSlide1Xml;
+
+  // From here on, all date edits operate on slide1XmlWithLabel.
+  const shapes = collectShapeBlocks(slide1XmlWithLabel);
   const dateLabelCandidates = shapes.filter((s) => s.xml.includes("Date</a:t>"));
 
   if (dateLabelCandidates.length < 1) {
@@ -358,7 +453,8 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
 
   const actualRunTexts = runs.map((r) => (r.hasText ? r.tText : null));
   const sameLength = actualRunTexts.length === expectedRunTexts.length;
-  const matches = sameLength && actualRunTexts.every((v, i) => v === expectedRunTexts[i]);
+  const matches =
+    sameLength && actualRunTexts.every((v, i) => v === expectedRunTexts[i]);
 
   if (!matches) {
     throw new Error(
@@ -401,7 +497,9 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const paraEndInScope = paragraphs[paragraphIndex].endInScope;
 
   const updatedScopeXml =
-    scopeXml.slice(0, paraStartInScope) + updatedParagraphXml + scopeXml.slice(paraEndInScope);
+    scopeXml.slice(0, paraStartInScope) +
+    updatedParagraphXml +
+    scopeXml.slice(paraEndInScope);
 
   const updatedShapeXml =
     shape.xml.slice(0, scopeOffset) +
@@ -409,11 +507,13 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     shape.xml.slice(scopeOffset + scopeXml.length);
 
   const updatedSlide1Xml =
-    slide1Xml.slice(0, shape.start) + updatedShapeXml + slide1Xml.slice(shape.end);
+    slide1XmlWithLabel.slice(0, shape.start) +
+    updatedShapeXml +
+    slide1XmlWithLabel.slice(shape.end);
 
-  // Robust guard: allow only the 5 intended date <a:t> nodes to differ.
+  // Guard: allow only the 5 intended date <a:t> nodes to differ (relative to slide1XmlWithLabel).
   verifyOnlyAllowedSlide1DiffsByATextNodes({
-    originalSlide1Xml: slide1Xml,
+    originalSlide1Xml: slide1XmlWithLabel,
     updatedSlide1Xml,
     dateParagraphXmlOriginal: paragraphXml,
     allowedDateRunIndexes: dateRunIndexes,
@@ -426,7 +526,9 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   return {
     updatedPptxBytes: out,
     detected: {
-      mode: "strict-template/date-shape-by-label+node-guard",
+      mode: labelResult.changed
+        ? "strict-template/add-static-label+date-only-node-guard"
+        : "strict-template/date-only-node-guard",
       slidePath: SLIDE1_PATH,
       shapeName,
       shapeId,
@@ -441,6 +543,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
  * @param {string} filename
  */
 export function downloadPptxBytes(pptxBytes, filename) {
+  /** This is a public function. */
   const blob = new Blob([pptxBytes], {
     type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   });
@@ -453,6 +556,7 @@ export function downloadPptxBytes(pptxBytes, filename) {
  * @param {Uint8Array} pptxBytes
  */
 export function createPptxObjectUrl(pptxBytes) {
+  /** This is a public function. */
   const blob = new Blob([pptxBytes], {
     type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   });
@@ -464,6 +568,7 @@ export function createPptxObjectUrl(pptxBytes) {
  * Formats today's date for <input type="date"> default value (yyyy-mm-dd).
  */
 export function todayIsoDate() {
+  /** This is a public function. */
   const d = new Date();
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
@@ -478,6 +583,7 @@ export function todayIsoDate() {
  * @returns {Promise<boolean>} true if unchanged, else throws Error
  */
 export async function assertLastSlideUnchanged(originalPptxArrayBuffer, updatedPptxBytes) {
+  /** This is a public function. */
   const originalZip = await JSZip.loadAsync(originalPptxArrayBuffer);
   const updatedZip = await JSZip.loadAsync(updatedPptxBytes);
 
