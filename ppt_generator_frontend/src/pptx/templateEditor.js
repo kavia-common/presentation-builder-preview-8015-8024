@@ -20,7 +20,7 @@ import { saveAs } from "file-saver";
  * - Update only the existing <a:t> node values within the 5 date runs:
  *     "\u00a0 {day}\u00a0", "{mon}", " ", "{yearHead3}", "{yearTail1}"
  *   leaving all <a:rPr> and all XML untouched.
- * - Verify slide1.xml changes occur only within those 5 <a:t> inner text ranges.
+ * - Verify slide1.xml changes occur only within those 5 <a:t> nodes (node-based guard).
  */
 
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
@@ -64,32 +64,6 @@ function escapeXmlText(text) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
-}
-
-/**
- * Returns an array of absolute ranges for <a:t>...</a:t> nodes within an XML fragment.
- * Each entry is { start, end, innerStart, innerEnd } where:
- * - start/end cover the entire <a:t ...>...</a:t> element
- * - innerStart/innerEnd cover the inner text only
- */
-function collectATextNodeRanges(xml) {
-  const ranges = [];
-  const re = /<a:t\b[^>]*>[\s\S]*?<\/a:t>/g;
-  let m;
-  while ((m = re.exec(xml)) !== null) {
-    const fullStart = m.index;
-    const fullEnd = fullStart + m[0].length;
-
-    const openEnd = xml.indexOf(">", fullStart);
-    const closeStart = xml.lastIndexOf("</a:t>", fullEnd);
-    if (openEnd < 0 || closeStart < 0) continue;
-
-    const innerStart = openEnd + 1;
-    const innerEnd = closeStart;
-
-    ranges.push({ start: fullStart, end: fullEnd, innerStart, innerEnd });
-  }
-  return ranges;
 }
 
 /**
@@ -174,6 +148,107 @@ function collectParagraphsFromShape(shapeXml) {
 }
 
 /**
+ * Extracts the full first <a:t ...>...</a:t> node from a run XML.
+ * Returns null if no <a:t>.
+ */
+function getFirstATextNodeFromRun(runXml) {
+  const m = runXml.match(/<a:t\b[^>]*>[\s\S]*?<\/a:t>/);
+  return m ? m[0] : null;
+}
+
+/**
+ * Verifies that differences between originalSlide1Xml and updatedSlide1Xml
+ * occur ONLY within the inner text of the 5 intended date <a:t> nodes on slide 1.
+ *
+ * This avoids brittle positional diffs (day can change 2 digits -> 1 digit, shifting
+ * subsequent characters and causing false positives).
+ */
+function verifyOnlyAllowedSlide1DiffsByATextNodes({
+  originalSlide1Xml,
+  updatedSlide1Xml,
+  dateParagraphXmlOriginal,
+  allowedDateRunIndexes,
+}) {
+  if (originalSlide1Xml === updatedSlide1Xml) return;
+
+  const aTextRe = /<a:t\b[^>]*>[\s\S]*?<\/a:t>/g;
+
+  // 1) Structure check: same number of <a:t> nodes.
+  const origNodes = originalSlide1Xml.match(aTextRe) ?? [];
+  const nextNodes = updatedSlide1Xml.match(aTextRe) ?? [];
+  if (origNodes.length !== nextNodes.length) {
+    throw new Error(
+      "Safety check failed: slide1.xml <a:t> node count changed. Only date text nodes may change."
+    );
+  }
+
+  // 2) Non-<a:t> parts must match exactly.
+  const origParts = originalSlide1Xml.split(aTextRe);
+  const nextParts = updatedSlide1Xml.split(aTextRe);
+  if (origParts.length !== nextParts.length) {
+    throw new Error(
+      "Safety check failed: slide1.xml structure changed (unexpected <a:t> segmentation)."
+    );
+  }
+  for (let i = 0; i < origParts.length; i += 1) {
+    if (origParts[i] !== nextParts[i]) {
+      throw new Error(
+        "Safety check failed: slide1.xml changed outside <a:t> nodes. Only date text may change."
+      );
+    }
+  }
+
+  // 3) Determine which global <a:t> nodes correspond to the 5 date runs.
+  const origParaPos = originalSlide1Xml.indexOf(dateParagraphXmlOriginal);
+  if (origParaPos < 0) {
+    throw new Error(
+      "Safety check failed: could not locate the expected date paragraph in original slide1.xml."
+    );
+  }
+
+  const paraRuns = collectRunsFromParagraph(dateParagraphXmlOriginal);
+  const allowedLocalATextNodes = allowedDateRunIndexes.map((runIdx) => {
+    const run = paraRuns[runIdx];
+    const node = run ? getFirstATextNodeFromRun(run) : null;
+    if (!node) {
+      throw new Error(
+        "Safety check failed: expected <a:t> node in one of the targeted date runs."
+      );
+    }
+    return node;
+  });
+
+  // Map node-string occurrences deterministically to global indexes (handle duplicates).
+  const queues = new Map();
+  origNodes.forEach((node, idx) => {
+    const q = queues.get(node) ?? [];
+    q.push(idx);
+    queues.set(node, q);
+  });
+
+  const allowedGlobalIndexes = new Set();
+  for (const node of allowedLocalATextNodes) {
+    const q = queues.get(node) ?? [];
+    if (!q.length) {
+      throw new Error(
+        "Safety check failed: could not map date <a:t> node to global index in slide1.xml."
+      );
+    }
+    allowedGlobalIndexes.add(q.shift());
+  }
+
+  // 4) All <a:t> nodes except the allowed ones must be identical byte-for-byte.
+  for (let i = 0; i < origNodes.length; i += 1) {
+    if (allowedGlobalIndexes.has(i)) continue;
+    if (origNodes[i] !== nextNodes[i]) {
+      throw new Error(
+        "Safety check failed: slide1.xml modified in a non-date <a:t> node. Only date text may change."
+      );
+    }
+  }
+}
+
+/**
  * PUBLIC_INTERFACE
  * Updates ONLY the date field on slide 1 for the shipped default template,
  * keeping all other slides/files untouched (including the last slide).
@@ -210,12 +285,13 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     );
   }
 
+  // The template uses real NBSP characters, not literal "\\u00a0".
+  const expectedRunTexts = ["Date", " ", ":", "\u00a0 24\u00a0", "Dec", " ", "202", "5"];
+
   let shape = null;
   if (dateLabelCandidates.length === 1) {
     shape = dateLabelCandidates[0];
   } else {
-    const expectedRunTexts = ["Date", " ", ":", "\u00a0 24\u00a0", "Dec", " ", "202", "5"];
-
     const matchesExpectedRuns = (shapeXml) => {
       const { paragraphs } = collectParagraphsFromShape(shapeXml);
       const p = paragraphs.find((x) => x.xml.includes("Date</a:t>"));
@@ -223,7 +299,6 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
 
       const runs = collectRunsFromParagraph(p.xml).map((runXml) => ({
         tText: getFirstATextFromRun(runXml),
-        // CRITICAL FIX: use `<a:t\b` (word boundary), not `<a:t\\b` (literal backslash+b)
         hasText: /<a:t\b/.test(runXml),
       }));
 
@@ -258,7 +333,9 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
 
   const paragraphIndex = paragraphs.findIndex((p) => p.xml.includes("Date</a:t>"));
   if (paragraphIndex < 0) {
-    throw new Error('Strict template mismatch: could not find "Date" paragraph inside date shape.');
+    throw new Error(
+      'Strict template mismatch: could not find "Date" paragraph inside date shape.'
+    );
   }
 
   const paragraphXml = paragraphs[paragraphIndex].xml;
@@ -268,9 +345,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     hasText: /<a:t\b/.test(runXml),
   }));
 
-  const expectedRunTexts = ["Date", " ", ":", "\u00a0 24\u00a0", "Dec", " ", "202", "5"];
   const actualRunTexts = runs.map((r) => (r.hasText ? r.tText : null));
-
   const sameLength = actualRunTexts.length === expectedRunTexts.length;
   const matches = sameLength && actualRunTexts.every((v, i) => v === expectedRunTexts[i]);
 
@@ -285,6 +360,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const yHead = y.slice(0, 3);
   const yTail = y.slice(3);
 
+  // Use real NBSP characters to preserve spacing semantics.
   const replacements = [`\u00a0 ${day}\u00a0`, mon, " ", yHead, yTail].map(escapeXmlText);
 
   const dateRunIndexes = [3, 4, 5, 6, 7];
@@ -324,28 +400,12 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const updatedSlide1Xml =
     slide1Xml.slice(0, shape.start) + updatedShapeXml + slide1Xml.slice(shape.end);
 
-  // IMPORTANT:
-  // `innerStartWithinParagraphShifted` / `innerEndWithinParagraphShifted` are already offsets
-  // within the *full paragraph XML string* (not within the <a:r> run only).
-  //
-  // To convert them into absolute positions within slide1.xml we need:
-  //   shape.start (absolute start of the <p:sp> block in slide1.xml)
-  // + scopeOffset (offset from shape start to the <p:txBody> scope we used)
-  // + paraStartInScope (offset from the scope start to the <a:p> paragraph start)
-  // + innerStartWithinParagraphShifted (offset from paragraph start to the <a:t> inner text)
-  //
-  // The previous implementation accidentally double-added `shape.start`, making the guard
-  // think legitimate date edits were outside the allowed ranges.
-  verifyOnlyAllowedSlide1Diffs({
+  // Robust guard: allow only the 5 intended date <a:t> nodes to differ.
+  verifyOnlyAllowedSlide1DiffsByATextNodes({
     originalSlide1Xml: slide1Xml,
     updatedSlide1Xml,
-    allowedChangedATextInnerRangesInUpdated: computeAllowedATextInnerRangesInUpdatedParagraph(
-      updatedParagraphXml,
-      dateRunIndexes
-    ).map((r) => ({
-      start: shape.start + scopeOffset + paraStartInScope + r.innerStartWithinParagraphShifted,
-      end: shape.start + scopeOffset + paraStartInScope + r.innerEndWithinParagraphShifted,
-    })),
+    dateParagraphXmlOriginal: paragraphXml,
+    allowedDateRunIndexes: dateRunIndexes,
   });
 
   zip.file(SLIDE1_PATH, updatedSlide1Xml);
@@ -355,103 +415,12 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   return {
     updatedPptxBytes: out,
     detected: {
-      mode: "strict-template/date-shape-by-label+diff-guard",
+      mode: "strict-template/date-shape-by-label+node-guard",
       slidePath: SLIDE1_PATH,
       shapeName,
       shapeId,
     },
   };
-}
-
-/**
- * Computes which <a:t> inner text ranges (in the UPDATED paragraph XML) are allowed to differ.
- * We only allow differences in the first <a:t> of the 5 targeted date runs.
- *
- * Returns array of objects:
- *  { innerStartWithinParagraphShifted, innerEndWithinParagraphShifted }
- * where the numbers are offsets within the full paragraph XML string.
- */
-function computeAllowedATextInnerRangesInUpdatedParagraph(updatedParagraphXml, dateRunIndexes) {
-  const runRegex = /<a:r\b[^>]*>[\s\S]*?<\/a:r>/g;
-
-  const runMatches = [];
-  let m;
-  while ((m = runRegex.exec(updatedParagraphXml)) !== null) {
-    runMatches.push({ runXml: m[0], start: m.index, end: m.index + m[0].length });
-  }
-
-  if (runMatches.length < Math.max(...dateRunIndexes) + 1) {
-    throw new Error("Internal error: updated paragraph run count changed unexpectedly.");
-  }
-
-  const allowed = [];
-
-  for (const idx of dateRunIndexes) {
-    const run = runMatches[idx];
-    const runTextRanges = collectATextNodeRanges(run.runXml);
-    if (!runTextRanges.length) {
-      throw new Error("Strict template mismatch: expected <a:t> in targeted date run.");
-    }
-    const first = runTextRanges[0];
-
-    allowed.push({
-      innerStartWithinParagraphShifted: run.start + first.innerStart,
-      innerEndWithinParagraphShifted: run.start + first.innerEnd,
-    });
-  }
-
-  return allowed;
-}
-
-/**
- * Verifies that differences between originalSlide1Xml and updatedSlide1Xml
- * occur ONLY inside the allowed <a:t> inner text ranges in the UPDATED XML.
- *
- * If any other difference is detected, throws an Error and refuses to output.
- */
-function verifyOnlyAllowedSlide1Diffs({
-  originalSlide1Xml,
-  updatedSlide1Xml,
-  allowedChangedATextInnerRangesInUpdated,
-}) {
-  if (originalSlide1Xml === updatedSlide1Xml) return;
-
-  const maxLen = Math.max(originalSlide1Xml.length, updatedSlide1Xml.length);
-
-  const isAllowedPos = (pos) =>
-    allowedChangedATextInnerRangesInUpdated.some((r) => pos >= r.start && pos < r.end);
-
-  let i = 0;
-  while (i < maxLen) {
-    const a = originalSlide1Xml[i];
-    const b = updatedSlide1Xml[i];
-
-    if (a === b) {
-      i += 1;
-      continue;
-    }
-
-    if (i >= originalSlide1Xml.length || i >= updatedSlide1Xml.length) {
-      if (!isAllowedPos(i)) {
-        throw new Error(
-          "Safety check failed: slide1.xml length/content changed outside the date <a:t> nodes. Aborting."
-        );
-      }
-      i += 1;
-      continue;
-    }
-
-    if (!isAllowedPos(i)) {
-      const ctxStart = Math.max(0, i - 40);
-      const ctxEnd = Math.min(updatedSlide1Xml.length, i + 80);
-      const ctx = updatedSlide1Xml.slice(ctxStart, ctxEnd);
-      throw new Error(
-        `Safety check failed: unintended slide1.xml modification detected at position ${i} outside allowed date text nodes. Context: ${ctx}`
-      );
-    }
-
-    i += 1;
-  }
 }
 
 /**
@@ -493,10 +462,6 @@ export function todayIsoDate() {
  * Verifies the strict invariant: the last slide XML must remain byte-for-byte identical
  * between the original template PPTX and the updated PPTX output.
  *
- * NOTE: We compare the raw bytes of the ZIP entry `ppt/slides/slide14.xml` because
- * the shipped template currently has 14 slides. If the template changes, update
- * this constant accordingly.
- *
  * @param {ArrayBuffer} originalPptxArrayBuffer
  * @param {Uint8Array} updatedPptxBytes
  * @returns {Promise<boolean>} true if unchanged, else throws Error
@@ -506,7 +471,6 @@ export async function assertLastSlideUnchanged(originalPptxArrayBuffer, updatedP
   const updatedZip = await JSZip.loadAsync(updatedPptxBytes);
 
   // Determine the "last slide" path from the original template at runtime.
-  // This makes the invariant robust even if the bundled template slide count changes.
   const slidePaths = originalZip
     .file(/^ppt\/slides\/slide\d+\.xml$/)
     .map((f) => f.name)
