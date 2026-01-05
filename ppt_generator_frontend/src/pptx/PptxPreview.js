@@ -22,8 +22,6 @@ export default function PptxPreview({
   debug = false,
   errorMessage = "",
   pipeline = null,
-  onSelectAddMode = null,
-  addMode = "dateOnly",
   skillFactoryUI = null,
 }) {
   const [slideIndexes, setSlideIndexes] = useState([]);
@@ -179,78 +177,53 @@ export default function PptxPreview({
             </a>
           ) : null}
 
-          <div className="add-mode">
-            <div className="add-mode-label">Add remaining slides</div>
-            <label className="radio" htmlFor="addModeDateOnly">
-              <input
-                id="addModeDateOnly"
-                type="radio"
-                name="addMode"
-                value="dateOnly"
-                checked={addMode === "dateOnly"}
-                onChange={() => onSelectAddMode && onSelectAddMode("dateOnly")}
-              />
-              Date-only (locked)
-            </label>
-            <label className="radio" htmlFor="addModeSkillFactory">
-              <input
-                id="addModeSkillFactory"
-                type="radio"
-                name="addMode"
-                value="skillFactory"
-                checked={addMode === "skillFactory"}
-                onChange={() =>
-                  onSelectAddMode && onSelectAddMode("skillFactory")
-                }
-              />
-              Skill Factory
-            </label>
+          {/* Skill Factory control: single, obvious action in the preview panel. */}
+          {skillFactoryUI ? (
+            <div className="add-mode" aria-label="Add Skill Factory">
+              <div className="add-mode-label">Add Skill Factory</div>
 
-            {skillFactoryUI?.enabled ? (
-              <div className="skill-factory-controls" aria-label="Add Skill Factory">
-                <div className="add-mode-label">Add Skill Factory</div>
-
-                <label className="field" style={{ minWidth: "220px" }}>
-                  <span className="hint" style={{ display: "block", marginBottom: 6 }}>
-                    Factory
-                  </span>
-                  <select
-                    className="skill-factory-select"
-                    value={skillFactoryUI.selectedKind || "java"}
-                    onChange={(e) =>
-                      skillFactoryUI.onChangeKind &&
-                      skillFactoryUI.onChangeKind(e.target.value)
-                    }
-                  >
-                    <option value="java">Java</option>
-                    <option value="dataEngineering">Data Engineering</option>
-                  </select>
-                </label>
-
-                <button
-                  className="btn btn-primary"
-                  type="button"
-                  onClick={() => skillFactoryUI.onAddFactory && skillFactoryUI.onAddFactory()}
+              <label className="field" style={{ minWidth: "220px" }}>
+                <span className="hint" style={{ display: "block", marginBottom: 6 }}>
+                  Factory
+                </span>
+                <select
+                  className="skill-factory-select"
+                  value={skillFactoryUI.selectedKind || "java"}
+                  onChange={(e) =>
+                    skillFactoryUI.onChangeKind &&
+                    skillFactoryUI.onChangeKind(e.target.value)
+                  }
                 >
-                  Add Factory (4 slides)
-                </button>
+                  <option value="java">Java</option>
+                  <option value="dataEngineering">Data Engineering</option>
+                </select>
+              </label>
 
-                {skillFactoryUI.addedFactories?.length ? (
-                  <div className="hint" style={{ marginTop: 8 }}>
-                    Added:{" "}
-                    <strong>
-                      {skillFactoryUI.addedFactories.map((f) => f.label).join(", ")}
-                    </strong>
-                  </div>
-                ) : (
-                  <div className="hint" style={{ marginTop: 8 }}>
-                    Adds 4 slides per factory after the existing slides, before the last slide.
-                    (Only the first factory slide is fully implemented in this iteration.)
-                  </div>
-                )}
-              </div>
-            ) : null}
-          </div>
+              <button
+                className="btn btn-primary"
+                type="button"
+                onClick={() =>
+                  skillFactoryUI.onAddFactory && skillFactoryUI.onAddFactory()
+                }
+              >
+                Add Skill Factory (4 slides)
+              </button>
+
+              {skillFactoryUI.addedFactories?.length ? (
+                <div className="hint">
+                  Added:{" "}
+                  <strong>
+                    {skillFactoryUI.addedFactories.map((f) => f.label).join(", ")}
+                  </strong>
+                </div>
+              ) : (
+                <div className="hint">
+                  Inserts 4 slides per factory before the final slide. Slide 1 remains date-only
+                  editable; the last slide stays unchanged.
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
 
         <div className="hint">

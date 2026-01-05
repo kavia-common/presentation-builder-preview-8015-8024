@@ -45,12 +45,6 @@ function App() {
   const [status, setStatus] = useState({ kind: "idle", message: "" });
   const [detectionInfo, setDetectionInfo] = useState(null);
 
-  // Controls future behavior for adding remaining slides.
-  // For this subtask:
-  // - dateOnly: only slide 1 date editing is applied.
-  // - skillFactory: user may append a Skill Factory (4 slides) before the last slide.
-  const [addMode, setAddMode] = useState("dateOnly"); // dateOnly | skillFactory
-
   // Skill Factory state
   const [skillFactories, setSkillFactories] = useState([]); // [{ kind, label }]
   const [selectedFactoryKind, setSelectedFactoryKind] = useState("java"); // java | dataEngineering
@@ -153,9 +147,9 @@ function App() {
 
           let finalBytes = dateOnlyBytes;
 
-          // Optional: append Skill Factory slides (4 per factory), inserted before last slide.
+          // Optional: insert Skill Factory slides (4 per factory), inserted before the last slide.
           // IMPORTANT: This must NOT modify the template's last slide bytes.
-          if (addMode === "skillFactory" && skillFactories.length) {
+          if (skillFactories.length) {
             setPipeline({
               step: "edit:loading",
               detail: `date=${dateISO}, skillFactories=${skillFactories.length}`,
@@ -176,7 +170,6 @@ function App() {
           debugLog("edit ok", {
             updatedBytes: finalBytes?.byteLength ?? finalBytes?.length,
             detected,
-            addMode,
             skillFactories,
           });
           setPipeline({
@@ -227,7 +220,7 @@ function App() {
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [templateBytes, dateISO, addMode, skillFactories]);
+  }, [templateBytes, dateISO, skillFactories]);
 
   useEffect(() => {
     return () => {
@@ -397,8 +390,6 @@ function App() {
                   : "Updated_Template.pptx"
               }
               pptxBytes={generatedBytes}
-              addMode={addMode}
-              onSelectAddMode={setAddMode}
               debug={isDebugEnabled()}
               errorMessage={
                 status.kind === "error" && status.message ? status.message : ""
@@ -409,7 +400,6 @@ function App() {
                   : null
               }
               skillFactoryUI={{
-                enabled: addMode === "skillFactory",
                 selectedKind: selectedFactoryKind,
                 onChangeKind: setSelectedFactoryKind,
                 onAddFactory: () => {
