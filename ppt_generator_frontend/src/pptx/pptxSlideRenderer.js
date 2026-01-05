@@ -11,16 +11,22 @@ import JSZip from "jszip";
  * 1) Render a base slide background fill.
  * 2) Render shape fills (solid) behind content (when present).
  * 3) Render picture shapes using slide relationships (<p:pic> -> r:embed target),
- *    honoring common crop rectangles to better match PowerPoint's view.
+ *    honoring common crop rectangles and PowerPoint-like aspect behavior.
  * 4) Render text from shapes (<p:sp>) with a best-effort mapping of:
  *    - position and size (EMU -> px)
  *    - font size, family, weight, italic, underline, color
- *    - letter spacing (rPr spc) to match template fidelity (THANK YOU slide)
+ *    - letter spacing (rPr spc)
  *    - alignment (left/center/right)
  *
+ * CRITICAL BUGFIX:
+ * Many real templates (including ours) wrap most content inside <p:grpSp> group shapes.
+ * Previous renderer iteration only processed immediate <p:sp> and <p:pic> nodes, which
+ * caused Slide 1 to render as blank (because its visible content is within grpSp).
+ * This file now supports grpSp recursively, preserving z-order and applying the
+ * group xfrm mapping (off/ext/chOff/chExt) to child coordinates.
+ *
  * Notes:
- * - This is not a full PowerPoint renderer. It is tuned for the bundled template
- *   and especially the final "THANK YOU" slide fidelity.
+ * - This is not a full PowerPoint renderer. It is tuned for the bundled template.
  * - Slide 1 date-only editing logic lives elsewhere; this module is purely read-only.
  */
 
@@ -123,6 +129,70 @@ function extractShapeTransformEmu(shapeXml) {
   };
 }
 
+function extractGroupTransformEmu(grpXml) {
+  /**
+   * Group transform:
+   * <a:xfrm>
+   *   <a:off .../><a:ext .../>
+   *   <a:chOff .../><a:chExt .../>
+   * </a:xfrm>
+   */
+  const xfrmMatch = grpXml.match(/<a:xfrm\b[\s\S]*?<\/a:xfrm>/);
+  const xfrm = xfrmMatch ? xfrmMatch[0] : "";
+
+  const offMatch = xfrm.match(/<a:off\b[^>]*\bx="(\d+)"\s+y="(\d+)"/);
+  const extMatch = xfrm.match(/<a:ext\b[^>]*\bcx="(\d+)"\s+cy="(\d+)"/);
+
+  const chOffMatch = xfrm.match(/<a:chOff\b[^>]*\bx="(\d+)"\s+y="(\d+)"/);
+  const chExtMatch = xfrm.match(/<a:chExt\b[^>]*\bcx="(\d+)"\s+cy="(\d+)"/);
+
+  const off = {
+    x: offMatch ? Number(offMatch[1]) : 0,
+    y: offMatch ? Number(offMatch[2]) : 0,
+  };
+  const ext = {
+    cx: extMatch ? Number(extMatch[1]) : 0,
+    cy: extMatch ? Number(extMatch[2]) : 0,
+  };
+  const chOff = {
+    x: chOffMatch ? Number(chOffMatch[1]) : off.x,
+    y: chOffMatch ? Number(chOffMatch[2]) : off.y,
+  };
+  const chExt = {
+    cx: chExtMatch ? Number(chExtMatch[1]) : ext.cx,
+    cy: chExtMatch ? Number(chExtMatch[2]) : ext.cy,
+  };
+
+  return { off, ext, chOff, chExt };
+}
+
+function mapEmuThroughGroup(child, group) {
+  /**
+   * Map a child rect from group local coordinates -> slide coordinates.
+   *
+   * PPT group mapping:
+   * slide = off + ((child - chOff) / chExt) * ext
+   *
+   * This is necessary for our template where most slide content lives in grpSp.
+   */
+  const safe = (v) => (Number.isFinite(v) ? v : 0);
+
+  const chExtCx = Math.max(1, safe(group.chExt.cx));
+  const chExtCy = Math.max(1, safe(group.chExt.cy));
+  const extCx = safe(group.ext.cx);
+  const extCy = safe(group.ext.cy);
+
+  const scaleX = extCx / chExtCx;
+  const scaleY = extCy / chExtCy;
+
+  const x = safe(group.off.x) + (safe(child.x) - safe(group.chOff.x)) * scaleX;
+  const y = safe(group.off.y) + (safe(child.y) - safe(group.chOff.y)) * scaleY;
+  const cx = safe(child.cx) * scaleX;
+  const cy = safe(child.cy) * scaleY;
+
+  return { x, y, cx, cy };
+}
+
 function collectSpTreeChildren(slideXml) {
   /**
    * Extracts the immediate children of <p:spTree> in order as raw xml fragments.
@@ -146,6 +216,7 @@ function collectSpTreeChildren(slideXml) {
 }
 
 function collectShapeBlocks(slideXml) {
+  // Legacy fallback (no grpSp/pic). Used only if spTree parse fails.
   const shapes = [];
   const re = /<p:sp\b[\s\S]*?<\/p:sp>/g;
   let m;
@@ -235,8 +306,7 @@ function parseTextStyle({ rPrXml, pPrXml }) {
       rPrXml.match(/<a:srgbClr\b[^>]*\bval="([0-9A-Fa-f]{6})"/)?.[1];
     if (runClr) return `#${runClr}`;
 
-    // Many template runs omit explicit color; for this project we bias towards
-    // a strong, near-black used on the last slide ("THANK YOU" is #0D0D0D).
+    // Many template runs omit explicit color; black-ish is a safe default.
     return "#0D0D0D";
   })();
 
@@ -291,7 +361,7 @@ function normalizeWhitespaceForSvg(text) {
   // PowerPoint often uses NBSP; map to space and preserve sequences via CSS.
   return String(text ?? "")
     .replaceAll("\u00a0", " ")
-    // PPTX can include literal tab runs (as seen in THANK\tYOU); map to spaces.
+    // PPTX can include literal tab runs; map to spaces.
     .replaceAll("\t", "    ");
 }
 
@@ -345,13 +415,12 @@ function mimeFromZipPath(zipPath) {
 
 /**
  * Extracts raster image dimensions from bytes (PNG/JPEG only).
- * Used to reproduce PowerPoint picture-frame behavior (aspect-ratio preserving cover + crop).
+ * Used to reproduce PowerPoint picture-frame behavior.
  */
 function getRasterImageSize(bytes, zipPath) {
   const ext = zipPath.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "png") {
     // PNG signature + IHDR chunk.
-    // width/height are 4-byte big-endian at offsets 16..23.
     if (bytes.length < 24) return null;
     const isPng =
       bytes[0] === 0x89 &&
@@ -417,16 +486,54 @@ function getRasterImageSize(bytes, zipPath) {
   return null;
 }
 
+function approxEqualRatio(a, b, tolFrac) {
+  const aa = Number(a);
+  const bb = Number(b);
+  if (!Number.isFinite(aa) || !Number.isFinite(bb) || aa <= 0 || bb <= 0) {
+    return false;
+  }
+  const diff = Math.abs(aa - bb);
+  return diff / Math.max(aa, bb) <= tolFrac;
+}
+
+/**
+ * Decides whether a picture should behave like "meet/contain" (no crop)
+ * or like "cover" (fill frame, possible crop).
+ *
+ * Heuristic tuned for the bundled template:
+ * - If there is explicit <a:srcRect> crop => we MUST use cover+clip.
+ * - If frame aspect ratio is already close to image aspect ratio => use meet.
+ *   (This matches the template’s last-slide background photo, avoiding extra crop.)
+ */
+function decidePictureFitMode({ destW, destH, srcW, srcH, crop }) {
+  if (crop && (crop.l || crop.r || crop.t || crop.b)) return "cover";
+  const destRatio = destW / Math.max(1, destH);
+  const srcRatio = srcW / Math.max(1, srcH);
+
+  // 5% tolerance seems safe for template images; avoid accidental behavior flips.
+  if (approxEqualRatio(destRatio, srcRatio, 0.05)) return "meet";
+
+  return "cover";
+}
+
 /**
  * Implements a PowerPoint-like picture mapping into a destination rectangle:
  * - maintain aspect ratio
- * - scale to "cover" the destination (like CSS object-fit: cover)
- * - then apply srcRect crop fractions (l/t/r/b) in source space
+ * - scale to "cover" the destination
+ * - then apply srcRect crop fractions (l/t/r/b)
  *
  * Returns geometry for an <image> element plus a clip rect:
  * { imgX, imgY, imgW, imgH, clipX, clipY, clipW, clipH }
  */
-function computePptPictureCoverGeometry({ destX, destY, destW, destH, srcW, srcH, crop }) {
+function computePptPictureCoverGeometry({
+  destX,
+  destY,
+  destW,
+  destH,
+  srcW,
+  srcH,
+  crop,
+}) {
   const safeSrcW = Math.max(1, Number(srcW) || 1);
   const safeSrcH = Math.max(1, Number(srcH) || 1);
 
@@ -439,15 +546,13 @@ function computePptPictureCoverGeometry({ destX, destY, destW, destH, srcW, srcH
   const visibleSrcW = Math.max(0.0001, safeSrcW * (1 - l - r));
   const visibleSrcH = Math.max(0.0001, safeSrcH * (1 - t - b));
 
-  // First, decide scale based on the *visible* source region to achieve cover.
+  // Decide scale based on visible region to achieve cover.
   const scale = Math.max(destW / visibleSrcW, destH / visibleSrcH);
 
   const scaledFullW = safeSrcW * scale;
   const scaledFullH = safeSrcH * scale;
 
-  // "Center" the visible area inside destination:
-  // visible area's top-left in scaled full image is (l*scaledFullW, t*scaledFullH)
-  // offset image so that visible area is centered into destination.
+  // Center the visible area inside destination.
   const visibleScaledW = visibleSrcW * scale;
   const visibleScaledH = visibleSrcH * scale;
 
@@ -467,6 +572,399 @@ function computePptPictureCoverGeometry({ destX, destY, destW, destH, srcW, srcH
     clipW: destW,
     clipH: destH,
   };
+}
+
+function computeMeetGeometry({ destX, destY, destW, destH, srcW, srcH }) {
+  const safeSrcW = Math.max(1, Number(srcW) || 1);
+  const safeSrcH = Math.max(1, Number(srcH) || 1);
+
+  const scale = Math.min(destW / safeSrcW, destH / safeSrcH);
+  const imgW = safeSrcW * scale;
+  const imgH = safeSrcH * scale;
+
+  const imgX = destX + (destW - imgW) / 2;
+  const imgY = destY + (destH - imgH) / 2;
+
+  return { imgX, imgY, imgW, imgH };
+}
+
+function extractGrpSpChildren(grpXml) {
+  // Inside <p:grpSp> there is a nested <p:grpSpPr>... and then child nodes.
+  // We extract direct children nodes (sp/pic/grpSp) and preserve order.
+  const inner = grpXml
+    .replace(/^<p:grpSp\b[\s\S]*?>/, "")
+    .replace(/<\/p:grpSp>$/, "");
+
+  const children = [];
+  const childRe = /<(p:sp|p:pic|p:grpSp)\b[\s\S]*?<\/\1>/g;
+  let m;
+  while ((m = childRe.exec(inner)) !== null) {
+    children.push(m[0]);
+  }
+  return children;
+}
+
+function renderShapeNodeToSvg({
+  nodeXml,
+  slideIndex,
+  relsById,
+  zip,
+  pxX,
+  pxY,
+  slideSize,
+  widthPx,
+  heightPx,
+  svgEls,
+  transform, // optional mapping function for child EMUs -> slide EMUs
+}) {
+  if (nodeXml.startsWith("<p:sp")) {
+    // 1) Shape fill.
+    const fill = extractShapeFillColor(nodeXml);
+    if (fill) {
+      let { x, y, cx, cy } = extractShapeTransformEmu(nodeXml);
+      if (transform) ({ x, y, cx, cy } = transform({ x, y, cx, cy }));
+      if (cx && cy) {
+        svgEls.push(
+          `<rect x="${pxX(x)}" y="${pxY(y)}" width="${pxX(cx)}" height="${pxY(
+            cy
+          )}" fill="${escapeXmlAttr(fill)}" />`
+        );
+      }
+    }
+
+    // 2) Text
+    if (nodeXml.includes("<p:txBody")) {
+      let { x, y, cx, cy } = extractShapeTransformEmu(nodeXml);
+      if (transform) ({ x, y, cx, cy } = transform({ x, y, cx, cy }));
+
+      if (cx && cy) {
+        const { lIns, tIns } = extractShapeTextBodyInsetsEmu(nodeXml);
+
+        const boxX = pxX(x + lIns);
+        const boxY = pxY(y + tIns);
+        const boxW = pxX(Math.max(0, cx - lIns));
+        const boxH = pxY(Math.max(0, cy - tIns));
+
+        const runs = extractTextRunsFromShape(nodeXml);
+        if (!runs.length) return;
+
+        // Group runs by paragraph.
+        const paragraphs = new Map();
+        for (const r of runs) {
+          const key = r.paragraphIndex;
+          const current = paragraphs.get(key) ?? { runs: [], seed: r };
+          current.runs.push(r);
+          paragraphs.set(key, current);
+        }
+
+        const sortedKeys = [...paragraphs.keys()].sort((a, b) => a - b);
+
+        // Baseline placement: PPT tends to be tighter than typical CSS line-height.
+        // Also note: different shapes in the template use different tIns; we respect it.
+        let cursorY = boxY;
+
+        for (const pIdx of sortedKeys) {
+          const p = paragraphs.get(pIdx);
+          if (!p) continue;
+
+          const seedStyle = parseTextStyle({
+            rPrXml: p.seed.rPrXml,
+            pPrXml: p.seed.pPrXml,
+          });
+          const marL = parseLeftInsetEmu(p.seed.pPrXml);
+          const insetX = pxX(marL);
+
+          // Use a slightly tighter line height to better match PPT's default.
+          const lineHeight = Math.max(1, seedStyle.fontSizePx * 1.06);
+          cursorY += lineHeight;
+
+          let xPos = boxX + insetX;
+          if (seedStyle.textAnchor === "middle") xPos = boxX + boxW / 2;
+          if (seedStyle.textAnchor === "end") xPos = boxX + boxW;
+
+          // Baseline within the line.
+          const yPos = Math.min(boxY + boxH, cursorY - lineHeight * 0.15);
+
+          const tspans = [];
+          for (const run of p.runs) {
+            const style = parseTextStyle({
+              rPrXml: run.rPrXml,
+              pPrXml: run.pPrXml,
+            });
+            const text = normalizeWhitespaceForSvg(run.text);
+            if (!text) continue;
+
+            const parts = [];
+            parts.push(`<tspan`);
+            parts.push(` font-family="${escapeXmlAttr(style.fontFamily)}"`);
+            parts.push(` font-size="${style.fontSizePx}"`);
+            parts.push(` font-weight="${style.fontWeight}"`);
+            parts.push(` font-style="${escapeXmlAttr(style.fontStyle)}"`);
+            parts.push(
+              ` text-decoration="${escapeXmlAttr(style.textDecoration)}"`
+            );
+            parts.push(` fill="${escapeXmlAttr(style.fill)}"`);
+
+            if (Math.abs(style.letterSpacingPx) > 0.01) {
+              parts.push(` letter-spacing="${style.letterSpacingPx}"`);
+            }
+
+            parts.push(`>`);
+            parts.push(`${escapeXmlAttr(text)}`);
+            parts.push(`</tspan>`);
+            tspans.push(parts.join(""));
+          }
+
+          if (!tspans.length) continue;
+
+          svgEls.push(
+            [
+              `<text x="${xPos}" y="${yPos}"`,
+              ` text-anchor="${escapeXmlAttr(seedStyle.textAnchor)}"`,
+              ` style="white-space: pre;"`,
+              `>`,
+              tspans.join(""),
+              `</text>`,
+            ].join("")
+          );
+        }
+      }
+    }
+    return;
+  }
+
+  if (nodeXml.startsWith("<p:pic")) {
+    const pic = extractPicFromPicXml(nodeXml);
+    if (!pic.embed) return;
+
+    const target = relsById.get(pic.embed);
+    const zipPath = resolveSlideRelTargetToZipPath(target);
+    if (!zipPath) return;
+
+    const imgFile = zip.file(zipPath);
+    if (!imgFile) return;
+
+    // eslint-disable-next-line no-undef
+    // Note: JSZip async calls are awaited by the caller; this function is invoked
+    // in an async loop in renderSlideToSvgDataUrl.
+    throw new Error("INTERNAL: picture node rendering requires async context.");
+  }
+
+  // Other node types ignored here.
+}
+
+async function renderPicNodeToSvgAsync({
+  nodeXml,
+  slideIndex,
+  relsById,
+  zip,
+  pxX,
+  pxY,
+  slideSize,
+  widthPx,
+  heightPx,
+  svgEls,
+  transform, // optional mapping function for child EMUs -> slide EMUs
+}) {
+  const pic = extractPicFromPicXml(nodeXml);
+  if (!pic.embed) return;
+
+  const target = relsById.get(pic.embed);
+  const zipPath = resolveSlideRelTargetToZipPath(target);
+  if (!zipPath) return;
+
+  const imgFile = zip.file(zipPath);
+  if (!imgFile) return;
+
+  const bytes = await imgFile.async("uint8array");
+  const mime = mimeFromZipPath(zipPath);
+  const b64 = safeB64FromBytes(bytes);
+
+  let rect = { x: pic.x, y: pic.y, cx: pic.cx, cy: pic.cy };
+  if (transform) rect = transform(rect);
+
+  const x = pxX(rect.x);
+  const y = pxY(rect.y);
+  const w = pxX(rect.cx);
+  const h = pxY(rect.cy);
+
+  const rasterSize = getRasterImageSize(bytes, zipPath);
+
+  if (rasterSize) {
+    const fitMode = decidePictureFitMode({
+      destW: w,
+      destH: h,
+      srcW: rasterSize.width,
+      srcH: rasterSize.height,
+      crop: pic.crop ?? { l: 0, t: 0, r: 0, b: 0 },
+    });
+
+    if (fitMode === "meet") {
+      const geom = computeMeetGeometry({
+        destX: x,
+        destY: y,
+        destW: w,
+        destH: h,
+        srcW: rasterSize.width,
+        srcH: rasterSize.height,
+      });
+
+      svgEls.push(
+        [
+          `<image x="${geom.imgX}" y="${geom.imgY}" width="${geom.imgW}" height="${geom.imgH}"`,
+          ` href="data:${mime};base64,${b64}"`,
+          // Our own geometry already does "meet".
+          ` preserveAspectRatio="none"`,
+          ` />`,
+        ].join("")
+      );
+      return;
+    }
+
+    // cover mode:
+    const geom = computePptPictureCoverGeometry({
+      destX: x,
+      destY: y,
+      destW: w,
+      destH: h,
+      srcW: rasterSize.width,
+      srcH: rasterSize.height,
+      crop: pic.crop ?? { l: 0, t: 0, r: 0, b: 0 },
+    });
+
+    const clipId = `clip_${slideIndex}_${Math.random().toString(16).slice(2)}`;
+    svgEls.push(
+      [
+        `<defs>`,
+        `<clipPath id="${clipId}">`,
+        `<rect x="${geom.clipX}" y="${geom.clipY}" width="${geom.clipW}" height="${geom.clipH}" />`,
+        `</clipPath>`,
+        `</defs>`,
+        `<image x="${geom.imgX}" y="${geom.imgY}" width="${geom.imgW}" height="${geom.imgH}"`,
+        ` href="data:${mime};base64,${b64}"`,
+        ` preserveAspectRatio="none"`,
+        ` clip-path="url(#${clipId})"`,
+        ` />`,
+      ].join("")
+    );
+    return;
+  }
+
+  // Unknown image format
+  if (pic.crop && (pic.crop.l || pic.crop.r || pic.crop.t || pic.crop.b)) {
+    const visibleW = Math.max(0.0001, 1 - pic.crop.l - pic.crop.r);
+    const visibleH = Math.max(0.0001, 1 - pic.crop.t - pic.crop.b);
+    const imgW = w / visibleW;
+    const imgH = h / visibleH;
+
+    const dx = x - imgW * pic.crop.l;
+    const dy = y - imgH * pic.crop.t;
+
+    const clipId = `clip_${slideIndex}_${Math.random().toString(16).slice(2)}`;
+    svgEls.push(
+      [
+        `<defs>`,
+        `<clipPath id="${clipId}">`,
+        `<rect x="${x}" y="${y}" width="${w}" height="${h}" />`,
+        `</clipPath>`,
+        `</defs>`,
+        `<image x="${dx}" y="${dy}" width="${imgW}" height="${imgH}"`,
+        ` href="data:${mime};base64,${b64}"`,
+        ` preserveAspectRatio="none"`,
+        ` clip-path="url(#${clipId})"`,
+        ` />`,
+      ].join("")
+    );
+    return;
+  }
+
+  // Final fallback: stretch to frame.
+  svgEls.push(
+    `<image x="${x}" y="${y}" width="${w}" height="${h}" href="data:${mime};base64,${b64}" preserveAspectRatio="none" />`
+  );
+}
+
+async function renderNodeList({
+  nodes,
+  slideIndex,
+  relsById,
+  zip,
+  pxX,
+  pxY,
+  slideSize,
+  widthPx,
+  heightPx,
+  svgEls,
+  groupTransformChain, // optional: mapping through nested groups
+}) {
+  const transform =
+    groupTransformChain && groupTransformChain.length
+      ? (childRect) => {
+          let r = childRect;
+          for (const g of groupTransformChain) r = mapEmuThroughGroup(r, g);
+          return r;
+        }
+      : null;
+
+  for (const nodeXml of nodes) {
+    if (nodeXml.startsWith("<p:grpSp")) {
+      const g = extractGroupTransformEmu(nodeXml);
+      const children = extractGrpSpChildren(nodeXml);
+
+      const nextChain = (groupTransformChain ?? []).concat([g]);
+      // Recurse, preserving order.
+      // eslint-disable-next-line no-await-in-loop
+      await renderNodeList({
+        nodes: children,
+        slideIndex,
+        relsById,
+        zip,
+        pxX,
+        pxY,
+        slideSize,
+        widthPx,
+        heightPx,
+        svgEls,
+        groupTransformChain: nextChain,
+      });
+      continue;
+    }
+
+    if (nodeXml.startsWith("<p:sp")) {
+      renderShapeNodeToSvg({
+        nodeXml,
+        slideIndex,
+        relsById,
+        zip,
+        pxX,
+        pxY,
+        slideSize,
+        widthPx,
+        heightPx,
+        svgEls,
+        transform,
+      });
+      continue;
+    }
+
+    if (nodeXml.startsWith("<p:pic")) {
+      // eslint-disable-next-line no-await-in-loop
+      await renderPicNodeToSvgAsync({
+        nodeXml,
+        slideIndex,
+        relsById,
+        zip,
+        pxX,
+        pxY,
+        slideSize,
+        widthPx,
+        heightPx,
+        svgEls,
+        transform,
+      });
+      continue;
+    }
+  }
 }
 
 /**
@@ -550,226 +1048,32 @@ export async function renderSlideToSvgDataUrl(pptxBytes, slideIndex, options = {
   // Preserve render order by iterating spTree children when possible.
   const spTreeChildren = collectSpTreeChildren(slideXml);
   const fallbackShapeBlocks = collectShapeBlocks(slideXml);
+
+  // If spTree parsing fails, fallback won't include pics/grps. But our template uses spTree,
+  // so primary path should work.
   const drawList = spTreeChildren.length ? spTreeChildren : fallbackShapeBlocks;
 
   const backgroundEls = [];
   const svgEls = [];
 
-  // Base slide background: white. (Template has white page; the photo is a picture on top.)
+  // Base slide background: white.
   backgroundEls.push(
     `<rect x="0" y="0" width="100%" height="100%" fill="#ffffff" />`
   );
 
-  // Iterate in order.
-  for (const nodeXml of drawList) {
-    if (nodeXml.startsWith("<p:sp")) {
-      // 1) Shape fill.
-      const fill = extractShapeFillColor(nodeXml);
-      if (fill) {
-        const { x, y, cx, cy } = extractShapeTransformEmu(nodeXml);
-        if (cx && cy) {
-          svgEls.push(
-            `<rect x="${pxX(x)}" y="${pxY(y)}" width="${pxX(cx)}" height="${pxY(
-              cy
-            )}" fill="${escapeXmlAttr(fill)}" />`
-          );
-        }
-      }
-
-      // 2) Text (rendered per paragraph; within paragraph per run to support letter-spacing)
-      if (nodeXml.includes("<p:txBody")) {
-        const { x, y, cx, cy } = extractShapeTransformEmu(nodeXml);
-        if (cx && cy) {
-          const { lIns, tIns } = extractShapeTextBodyInsetsEmu(nodeXml);
-
-          const boxX = pxX(x + lIns);
-          const boxY = pxY(y + tIns);
-          const boxW = pxX(Math.max(0, cx - lIns));
-          const boxH = pxY(Math.max(0, cy - tIns));
-
-          const runs = extractTextRunsFromShape(nodeXml);
-          if (!runs.length) continue;
-
-          // Group runs by paragraph.
-          const paragraphs = new Map();
-          for (const r of runs) {
-            const key = r.paragraphIndex;
-            const current = paragraphs.get(key) ?? { runs: [], seed: r };
-            current.runs.push(r);
-            paragraphs.set(key, current);
-          }
-
-          const sortedKeys = [...paragraphs.keys()].sort((a, b) => a - b);
-
-          // Improve baseline placement: start at top of the text box and add
-          // ascent-ish offset (0.85em) per line.
-          let cursorY = boxY;
-
-          for (const pIdx of sortedKeys) {
-            const p = paragraphs.get(pIdx);
-            if (!p) continue;
-
-            const seedStyle = parseTextStyle({ rPrXml: p.seed.rPrXml, pPrXml: p.seed.pPrXml });
-            const marL = parseLeftInsetEmu(p.seed.pPrXml);
-            const insetX = pxX(marL);
-
-            // Approx line height: 1.12 is closer to PPT default for the template.
-            const lineHeight = Math.max(1, seedStyle.fontSizePx * 1.12);
-            cursorY += lineHeight;
-
-            let xPos = boxX + insetX;
-            if (seedStyle.textAnchor === "middle") xPos = boxX + boxW / 2;
-            if (seedStyle.textAnchor === "end") xPos = boxX + boxW;
-
-            // Baseline within the line.
-            const yPos = Math.min(boxY + boxH, cursorY - lineHeight * 0.18);
-
-            // Render each run as a <tspan> with its own style so we preserve
-            // letter-spacing differences (critical for THANK YOU).
-            const tspans = [];
-            for (const run of p.runs) {
-              const style = parseTextStyle({ rPrXml: run.rPrXml, pPrXml: run.pPrXml });
-              const text = normalizeWhitespaceForSvg(run.text);
-              if (!text) continue;
-
-              const parts = [];
-              parts.push(`<tspan`);
-              parts.push(` font-family="${escapeXmlAttr(style.fontFamily)}"`);
-              parts.push(` font-size="${style.fontSizePx}"`);
-              parts.push(` font-weight="${style.fontWeight}"`);
-              parts.push(` font-style="${escapeXmlAttr(style.fontStyle)}"`);
-              parts.push(
-                ` text-decoration="${escapeXmlAttr(style.textDecoration)}"`
-              );
-              parts.push(` fill="${escapeXmlAttr(style.fill)}"`);
-
-              // Per-run letter spacing.
-              if (Math.abs(style.letterSpacingPx) > 0.01) {
-                parts.push(` letter-spacing="${style.letterSpacingPx}"`);
-              }
-
-              // Keep x on the first tspan only; others flow naturally.
-              parts.push(`>`);
-              parts.push(`${escapeXmlAttr(text)}`);
-              parts.push(`</tspan>`);
-              tspans.push(parts.join(""));
-            }
-
-            if (!tspans.length) continue;
-
-            svgEls.push(
-              [
-                `<text x="${xPos}" y="${yPos}"`,
-                ` text-anchor="${escapeXmlAttr(seedStyle.textAnchor)}"`,
-                // Preserve whitespace and prevent run collapsing.
-                ` style="white-space: pre;"`,
-                `>`,
-                tspans.join(""),
-                `</text>`,
-              ].join("")
-            );
-          }
-        }
-      }
-      continue;
-    }
-
-    if (nodeXml.startsWith("<p:pic")) {
-      // Picture node
-      const pic = extractPicFromPicXml(nodeXml);
-      if (!pic.embed) continue;
-
-      const target = relsById.get(pic.embed);
-      const zipPath = resolveSlideRelTargetToZipPath(target);
-      if (!zipPath) continue;
-
-      const imgFile = zip.file(zipPath);
-      if (!imgFile) continue;
-
-      const bytes = await imgFile.async("uint8array");
-      const mime = mimeFromZipPath(zipPath);
-      const b64 = safeB64FromBytes(bytes);
-
-      const x = pxX(pic.x);
-      const y = pxY(pic.y);
-      const w = pxX(pic.cx);
-      const h = pxY(pic.cy);
-
-      // PowerPoint pictures generally preserve aspect ratio and behave like a
-      // "cover" mapping within the picture frame. Using preserveAspectRatio="none"
-      // stretches (incorrect for the last slide background photo).
-      //
-      // We therefore:
-      // - detect image pixel dimensions (png/jpg)
-      // - compute cover mapping in slide-space
-      // - apply srcRect crop fractions in source-space
-      // - clip to the picture frame
-      const rasterSize = getRasterImageSize(bytes, zipPath);
-
-      if (rasterSize) {
-        const geom = computePptPictureCoverGeometry({
-          destX: x,
-          destY: y,
-          destW: w,
-          destH: h,
-          srcW: rasterSize.width,
-          srcH: rasterSize.height,
-          crop: pic.crop ?? { l: 0, t: 0, r: 0, b: 0 },
-        });
-
-        const clipId = `clip_${slideIndex}_${Math.random().toString(16).slice(2)}`;
-        svgEls.push(
-          [
-            `<defs>`,
-            `<clipPath id="${clipId}">`,
-            `<rect x="${geom.clipX}" y="${geom.clipY}" width="${geom.clipW}" height="${geom.clipH}" />`,
-            `</clipPath>`,
-            `</defs>`,
-            `<image x="${geom.imgX}" y="${geom.imgY}" width="${geom.imgW}" height="${geom.imgH}"`,
-            ` href="data:${mime};base64,${b64}"`,
-            // We provide explicit x/y/width/height, so "none" is appropriate here (no extra scaling).
-            ` preserveAspectRatio="none"`,
-            ` clip-path="url(#${clipId})"`,
-            ` />`,
-          ].join("")
-        );
-      } else if (pic.crop && (pic.crop.l || pic.crop.r || pic.crop.t || pic.crop.b)) {
-        // Fallback for unknown formats: keep previous behavior (stretch + crop).
-        const visibleW = Math.max(0.0001, 1 - pic.crop.l - pic.crop.r);
-        const visibleH = Math.max(0.0001, 1 - pic.crop.t - pic.crop.b);
-        const imgW = w / visibleW;
-        const imgH = h / visibleH;
-
-        const dx = x - imgW * pic.crop.l;
-        const dy = y - imgH * pic.crop.t;
-
-        const clipId = `clip_${slideIndex}_${Math.random().toString(16).slice(2)}`;
-        svgEls.push(
-          [
-            `<defs>`,
-            `<clipPath id="${clipId}">`,
-            `<rect x="${x}" y="${y}" width="${w}" height="${h}" />`,
-            `</clipPath>`,
-            `</defs>`,
-            `<image x="${dx}" y="${dy}" width="${imgW}" height="${imgH}"`,
-            ` href="data:${mime};base64,${b64}"`,
-            ` preserveAspectRatio="none"`,
-            ` clip-path="url(#${clipId})"`,
-            ` />`,
-          ].join("")
-        );
-      } else {
-        // Fallback: no crop info and unknown image size -> stretch to frame.
-        svgEls.push(
-          `<image x="${x}" y="${y}" width="${w}" height="${h}" href="data:${mime};base64,${b64}" preserveAspectRatio="none" />`
-        );
-      }
-
-      continue;
-    }
-
-    // Group shapes not explicitly supported: ignore for now (rare in template)
-  }
+  await renderNodeList({
+    nodes: drawList,
+    slideIndex,
+    relsById,
+    zip,
+    pxX,
+    pxY,
+    slideSize,
+    widthPx,
+    heightPx,
+    svgEls,
+    groupTransformChain: [],
+  });
 
   // Compose layers: base bg, then everything in z-order.
   const svgLayers = [...backgroundEls, ...svgEls];

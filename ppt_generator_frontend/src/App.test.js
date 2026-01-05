@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import JSZip from "jszip";
 import App from "./App";
 import { assertLastSlideUnchanged, updatePptxDateOnly } from "./pptx/templateEditor";
+import { renderSlideToSvgDataUrl } from "./pptx/pptxSlideRenderer";
 
 // Increase default test timeout: JSZip + SVG slide rendering can be slower in CI.
 // This is a regression guard only; production behavior is unaffected.
@@ -86,5 +87,25 @@ describe("PPTX preview regeneration", () => {
     const template = await makeMinimalPptxArrayBuffer();
     const { updatedPptxBytes } = await updatePptxDateOnly(template, "2026-01-06");
     await expect(assertLastSlideUnchanged(template, updatedPptxBytes)).resolves.toEqual(true);
+  });
+
+  test("renderer regression: slide 1 (bundled template) renders non-empty SVG (grpSp supported)", async () => {
+    // This guards the reported regression: Slide 1 disappeared when grpSp nodes were skipped.
+    // The renderer is read-only, so this cannot affect PPTX invariants.
+    const res = await fetch("/assets/template.pptx");
+    const buf = await res.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+
+    const out = await renderSlideToSvgDataUrl(bytes, 1, { widthPx: 520 });
+    expect(out.dataUrl).toMatch(/^data:image\/svg\+xml;base64,/);
+
+    const svg = decodeURIComponent(
+      escape(atob(out.dataUrl.split(",")[1] || ""))
+    );
+
+    // Template slide 1 is largely picture-backed; ensure we at least have an image element.
+    expect(svg.includes("<image")).toBe(true);
+    // Slide 1 includes a visible "Date" label in the left block.
+    expect(svg.includes(">Date<") || svg.includes("Date")).toBe(true);
   });
 });
