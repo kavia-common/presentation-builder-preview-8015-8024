@@ -324,6 +324,18 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const updatedSlide1Xml =
     slide1Xml.slice(0, shape.start) + updatedShapeXml + slide1Xml.slice(shape.end);
 
+  // IMPORTANT:
+  // `innerStartWithinParagraphShifted` / `innerEndWithinParagraphShifted` are already offsets
+  // within the *full paragraph XML string* (not within the <a:r> run only).
+  //
+  // To convert them into absolute positions within slide1.xml we need:
+  //   shape.start (absolute start of the <p:sp> block in slide1.xml)
+  // + scopeOffset (offset from shape start to the <p:txBody> scope we used)
+  // + paraStartInScope (offset from the scope start to the <a:p> paragraph start)
+  // + innerStartWithinParagraphShifted (offset from paragraph start to the <a:t> inner text)
+  //
+  // The previous implementation accidentally double-added `shape.start`, making the guard
+  // think legitimate date edits were outside the allowed ranges.
   verifyOnlyAllowedSlide1Diffs({
     originalSlide1Xml: slide1Xml,
     updatedSlide1Xml,
@@ -331,8 +343,8 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
       updatedParagraphXml,
       dateRunIndexes
     ).map((r) => ({
-      start: shape.start + (scopeOffset + (paraStartInScope + r.innerStartWithinParagraphShifted)),
-      end: shape.start + (scopeOffset + (paraStartInScope + r.innerEndWithinParagraphShifted)),
+      start: shape.start + scopeOffset + paraStartInScope + r.innerStartWithinParagraphShifted,
+      end: shape.start + scopeOffset + paraStartInScope + r.innerEndWithinParagraphShifted,
     })),
   });
 

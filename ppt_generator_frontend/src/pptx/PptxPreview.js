@@ -14,17 +14,29 @@ import React, { useEffect, useMemo, useState } from "react";
  */
 export default function PptxPreview({ url, filename, debug = false }) {
   const [hasLoadEvent, setHasLoadEvent] = useState(false);
+  const [embedError, setEmbedError] = useState("");
 
   useEffect(() => {
     setHasLoadEvent(false);
+    setEmbedError("");
   }, [url]);
 
   const label = useMemo(() => filename || "Generated.pptx", [filename]);
 
+  // Always provide a user-visible surface (never a blank card).
+  // If url is empty, show an explanatory placeholder. If url exists, ALWAYS show the link.
   if (!url) {
     return (
-      <div className="empty-preview">
-        Preview will appear here once the template is loaded and the PPTX is generated.
+      <div className="pptx-preview">
+        <div className="preview-toolbar" aria-label="Preview actions">
+          <div className="hint">
+            Preview will appear here once the template is loaded and the PPTX is generated.
+          </div>
+        </div>
+
+        <div className="empty-preview">
+          Waiting for generation output…
+        </div>
       </div>
     );
   }
@@ -36,13 +48,20 @@ export default function PptxPreview({ url, filename, debug = false }) {
           Download / Open PPTX
         </a>
         <div className="hint">
-          If slides are not visible below, your browser likely can’t render PPTX inline.
-          Use “Download / Open PPTX”.
+          Most browsers can’t render PPTX inline. If slides are not visible below, use “Download /
+          Open PPTX”.
           {debug ? (
             <>
               {" "}
               <span>
-                (embed load event: <strong>{hasLoadEvent ? "fired" : "pending"}</strong>)
+                (iframe load: <strong>{hasLoadEvent ? "fired" : "pending"}</strong>
+                {embedError ? (
+                  <>
+                    {", error: "}
+                    <strong>{embedError}</strong>
+                  </>
+                ) : null}
+                )
               </span>
             </>
           ) : null}
@@ -56,6 +75,7 @@ export default function PptxPreview({ url, filename, debug = false }) {
           className="preview-frame"
           src={url}
           onLoad={() => setHasLoadEvent(true)}
+          onError={() => setEmbedError("iframe error")}
         />
 
         {/* Secondary attempt via <object> (sometimes behaves differently than iframe). */}
@@ -64,6 +84,7 @@ export default function PptxPreview({ url, filename, debug = false }) {
           data={url}
           type="application/vnd.openxmlformats-officedocument.presentationml.presentation"
           aria-label="PPTX Object Preview"
+          onError={() => setEmbedError("object error")}
         >
           <div className="empty-preview">
             Inline PPTX preview is not supported in this browser. Use the link above to open the
