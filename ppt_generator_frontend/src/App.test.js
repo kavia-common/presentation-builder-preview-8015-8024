@@ -46,14 +46,26 @@ async function makeMinimalPptxArrayBuffer() {
 
 describe("PPTX preview regeneration", () => {
   test("changing the date regenerates the blob URL and keeps a visible Open/Download link", async () => {
-    global.fetch = jest.fn(async () => ({
-      ok: true,
-      arrayBuffer: async () => await makeMinimalPptxArrayBuffer(),
-    }));
+    const prevFetch = global.fetch;
+
+    // Mock only the template PPTX fetch for this test.
+    global.fetch = jest.fn(async (input) => {
+      const url = String(input || "");
+      if (url === "/assets/template.pptx") {
+        return {
+          ok: true,
+          status: 200,
+          arrayBuffer: async () => await makeMinimalPptxArrayBuffer(),
+        };
+      }
+      // Fall back to any existing polyfill for other URLs.
+      if (prevFetch) return await prevFetch(input);
+      throw new Error(`Unhandled fetch in test: ${url}`);
+    });
 
     render(<App />);
 
-    // Wait until generation has produced a PPTX URL (the link is rendered only when `url` exists).
+    // Wait until generation has produced a PPTX URL (link is rendered when bytes exist).
     const firstLink = await screen.findByRole(
       "link",
       { name: "Download / Open PPTX" },
@@ -81,6 +93,8 @@ describe("PPTX preview regeneration", () => {
     // Carousel nav should exist (regression guard).
     expect(screen.getByRole("button", { name: "Prev" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next" })).toBeInTheDocument();
+
+    global.fetch = prevFetch;
   });
 
   test("strict invariant: last slide remains byte-for-byte unchanged", async () => {

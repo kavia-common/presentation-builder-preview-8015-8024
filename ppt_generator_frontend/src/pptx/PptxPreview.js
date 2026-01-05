@@ -33,6 +33,32 @@ export default function PptxPreview({
 
   const label = useMemo(() => filename || "Generated.pptx", [filename]);
 
+  // Keep a resilient link even if the parent URL prop is briefly empty.
+  // The preview renderer is read-only; this does not affect PPTX invariants.
+  const [localUrl, setLocalUrl] = useState("");
+
+  useEffect(() => {
+    if (!pptxBytes || !pptxBytes.length) {
+      setLocalUrl("");
+      return () => {};
+    }
+
+    const next = URL.createObjectURL(
+      new Blob([pptxBytes], {
+        type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      })
+    );
+    setLocalUrl(next);
+
+    return () => {
+      try {
+        URL.revokeObjectURL(next);
+      } catch (e) {
+        // ignore
+      }
+    };
+  }, [pptxBytes]);
+
   // When new PPTX bytes arrive, enumerate slides and reset selection to slide 1.
   useEffect(() => {
     let cancelled = false;
@@ -99,7 +125,8 @@ export default function PptxPreview({
     };
   }, [pptxBytes, slideIndexes, currentIdx]);
 
-  const showError = Boolean((!url && errorMessage) || renderError);
+  const effectiveUrl = url || localUrl;
+  const showError = Boolean((!effectiveUrl && errorMessage) || renderError);
   const canNavigate = slideIndexes.length > 1;
   const currentSlideNumber = slideIndexes.length
     ? slideIndexes[Math.min(currentIdx, slideIndexes.length - 1)]
@@ -144,9 +171,9 @@ export default function PptxPreview({
     <div className="pptx-preview">
       <div className="preview-toolbar" aria-label="Preview actions">
         <div className="preview-actions-row">
-          {/* IMPORTANT: Keep link always visible when URL exists (test + UX). */}
-          {url ? (
-            <a className="btn btn-secondary" href={url} download={label}>
+          {/* IMPORTANT: Keep link always visible when PPTX bytes exist (prop url OR local fallback). */}
+          {effectiveUrl ? (
+            <a className="btn btn-secondary" href={effectiveUrl} download={label}>
               Download / Open PPTX
             </a>
           ) : null}

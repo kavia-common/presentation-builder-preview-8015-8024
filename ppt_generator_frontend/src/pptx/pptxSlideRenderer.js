@@ -173,17 +173,30 @@ function mapEmuThroughGroup(child, group) {
    * PPT group mapping:
    * slide = off + ((child - chOff) / chExt) * ext
    *
-   * This is necessary for our template where most slide content lives in grpSp.
+   * IMPORTANT EDGE CASE:
+   * Some slides (including the bundled template’s last slide) use a top-level
+   * group with ext/chExt = 0. In that case we must treat the group mapping as
+   * identity; otherwise all children collapse to (0,0) with 0 size -> blank slide.
    */
   const safe = (v) => (Number.isFinite(v) ? v : 0);
 
-  const chExtCx = Math.max(1, safe(group.chExt.cx));
-  const chExtCy = Math.max(1, safe(group.chExt.cy));
   const extCx = safe(group.ext.cx);
   const extCy = safe(group.ext.cy);
+  const chExtCxRaw = safe(group.chExt.cx);
+  const chExtCyRaw = safe(group.chExt.cy);
 
-  const scaleX = extCx / chExtCx;
-  const scaleY = extCy / chExtCy;
+  // Degenerate group mapping: treat as identity mapping for children.
+  if (extCx <= 0 || extCy <= 0 || chExtCxRaw <= 0 || chExtCyRaw <= 0) {
+    return {
+      x: safe(child.x) + safe(group.off.x),
+      y: safe(child.y) + safe(group.off.y),
+      cx: safe(child.cx),
+      cy: safe(child.cy),
+    };
+  }
+
+  const scaleX = extCx / chExtCxRaw;
+  const scaleY = extCy / chExtCyRaw;
 
   const x = safe(group.off.x) + (safe(child.x) - safe(group.chOff.x)) * scaleX;
   const y = safe(group.off.y) + (safe(child.y) - safe(group.chOff.y)) * scaleY;
@@ -197,21 +210,70 @@ function collectSpTreeChildren(slideXml) {
   /**
    * Extracts the immediate children of <p:spTree> in order as raw xml fragments.
    * This preserves z-order significantly better than rendering by type groups.
+   *
+   * CRITICAL RELIABILITY FIX:
+   * Regex like /<(p:grpSp)[\\s\\S]*?<\\/p:grpSp>/ is NOT nesting-safe and can
+   * accidentally consume only part of a nested group or stop too early.
+   * We instead do a simple depth-aware scan for top-level p:sp / p:pic / p:grpSp.
    */
   const tree =
     slideXml.match(/<p:spTree\b[\s\S]*?<\/p:spTree>/)?.[0] ?? "";
   if (!tree) return [];
-  // Remove the wrapper tags and keep inner xml.
+
   const inner = tree
     .replace(/^<p:spTree\b[\s\S]*?>/, "")
     .replace(/<\/p:spTree>$/, "");
 
+  // Extract top-level blocks by scanning for opening tags and counting depth.
+  const allowed = new Set(["p:sp", "p:pic", "p:grpSp"]);
+  const openTagRe = /<(p:sp|p:pic|p:grpSp)\b/g;
+
   const children = [];
-  const childRe = /<(p:sp|p:pic|p:grpSp)\b[\s\S]*?<\/\1>/g;
   let m;
-  while ((m = childRe.exec(inner)) !== null) {
-    children.push(m[0]);
+
+  while ((m = openTagRe.exec(inner)) !== null) {
+    const tag = m[1];
+    if (!allowed.has(tag)) continue;
+
+    const start = m.index;
+    let i = openTagRe.lastIndex;
+    let depth = 1;
+
+    // Find matching close tag, accounting for nested same tags.
+    while (i < inner.length && depth > 0) {
+      const nextOpen = inner.slice(i).match(/<(p:sp|p:pic|p:grpSp)\b/);
+      const nextCloseIdx = inner.indexOf(`</${tag}>`, i);
+
+      if (nextCloseIdx === -1) break;
+
+      const nextOpenIdx =
+        nextOpen && typeof nextOpen.index === "number"
+          ? i + nextOpen.index
+          : -1;
+
+      if (nextOpenIdx !== -1 && nextOpenIdx < nextCloseIdx) {
+        // If the next open is the same tag we’re currently closing, increase depth.
+        const nextOpenTag = inner
+          .slice(nextOpenIdx)
+          .match(/<(p:sp|p:pic|p:grpSp)\b/)?.[1];
+        if (nextOpenTag === tag) depth += 1;
+
+        i = nextOpenIdx + 1;
+        continue;
+      }
+
+      // We found a close for the current tag before any same-tag open.
+      depth -= 1;
+      i = nextCloseIdx + (`</${tag}>`.length);
+    }
+
+    const end = i;
+    if (end > start) {
+      children.push(inner.slice(start, end));
+      openTagRe.lastIndex = end; // continue after this block
+    }
   }
+
   return children;
 }
 
@@ -832,7 +894,7 @@ async function renderPicNodeToSvgAsync({
       crop: pic.crop ?? { l: 0, t: 0, r: 0, b: 0 },
     });
 
-    const clipId = `clip_${slideIndex}_${Math.random().toString(16).slice(2)}`;
+    const clipId = `clip_${slideIndex}_${svgEls.length}`;
     svgEls.push(
       [
         `<defs>`,
