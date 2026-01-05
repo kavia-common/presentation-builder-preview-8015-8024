@@ -1,4 +1,8 @@
 import JSZip from "jszip";
+import {
+  applySkillFactoryPlaceholderSlides,
+  applySkillFactorySlide1Content,
+} from "./skillFactorySlide1";
 
 /**
  * Skill Factory slide scaffolding utilities.
@@ -11,8 +15,7 @@ import JSZip from "jszip";
  * This module is intentionally conservative:
  * - It creates new slide parts by COPYING existing slide parts (byte-preserving approach).
  * - It does not modify the template's last slide part.
- * - For this iteration, only the 1st slide of a factory is "fully implemented" by copying
- *   an existing slide as a stand-in layout. Slides 2-4 are placeholders (also copied).
+ * - It only modifies the newly inserted (copied) Skill Factory slides.
  *
  * Future iterations can introduce richer slide XML generation, but must keep the invariant
  * that the template's last slide bytes remain unchanged.
@@ -189,7 +192,7 @@ async function copySlideParts(zip, sourceSlideIndex, newSlideIndexes) {
  * Adds a Skill Factory (4 slides) before the last slide in the PPTX.
  *
  * @param {Uint8Array} pptxBytes - existing PPTX bytes (already date-only edited)
- * @param {{ kind: "java" | "dataEngineering", label: string }} factory
+ * @param {{ kind: "java" | "dataEngineering", label: string, slide1?: any }} factory
  * @returns {Promise<{ updatedPptxBytes: Uint8Array, insertedSlideIndexes: number[] }>}
  */
 export async function addSkillFactoryToPptx(pptxBytes, factory) {
@@ -204,15 +207,24 @@ export async function addSkillFactoryToPptx(pptxBytes, factory) {
 
   // We will append 4 slides after the highest existing slide index, and then insert them before the last slide in ordering.
   const maxExisting = lastSlideIndex;
-  const newSlideIndexes = [maxExisting + 1, maxExisting + 2, maxExisting + 3, maxExisting + 4];
+  const newSlideIndexes = [
+    maxExisting + 1,
+    maxExisting + 2,
+    maxExisting + 3,
+    maxExisting + 4,
+  ];
 
   // Choose a source slide to copy from.
-  // For now: Slide 1 is used as a stand-in for "fully implemented" first factory slide layout.
-  // Placeholder slides are also copied from slide 1, but their titles will be TODO in next iteration.
+  // For now we copy slide 1 as the base, then mutate the copied slide (factory slide 1) to match the screenshot.
   const sourceSlideIndex = 1;
 
   // 1) Copy slide parts (xml and rels) to new slide indices.
   await copySlideParts(zip, sourceSlideIndex, newSlideIndexes);
+
+  // 1b) Apply Skill Factory content on the newly inserted slides only.
+  // Slide 1 is "fully implemented"; slides 2-4 are placeholders for now.
+  await applySkillFactorySlide1Content(zip, newSlideIndexes[0], factory.slide1 || {});
+  await applySkillFactoryPlaceholderSlides(zip, newSlideIndexes.slice(1), factory.label);
 
   // 2) Update [Content_Types].xml to include Override for each new slide part.
   const ctXmlOriginal = await mustGetFileString(zip, CONTENT_TYPES_XML);
@@ -249,8 +261,6 @@ export async function addSkillFactoryToPptx(pptxBytes, factory) {
   const presXmlOriginal = await mustGetFileString(zip, PRESENTATION_XML);
   const { sldIdLstXml, entries } = parseSldIdList(presXmlOriginal);
 
-  // Identify the last slide's relationship id by assuming the last <p:sldId> entry corresponds to the last slide.
-  // In typical PPTX, sldIdLst ordering is the deck order.
   if (!entries.length) throw new Error("presentation.xml has empty <p:sldIdLst>.");
 
   const lastEntry = entries[entries.length - 1];
@@ -265,9 +275,7 @@ export async function addSkillFactoryToPptx(pptxBytes, factory) {
     return node;
   });
 
-  // Insert new nodes before the last slide entry node in sldIdLstXml (string insertion preserves most formatting).
   const updatedSldIdLstXml = (() => {
-    // Try direct replace of the last node occurrence
     const replacement = `${insertedNodes.join("")}${lastEntryRaw}`;
     const replaced = replaceOnce(sldIdLstXml, lastEntryRaw, replacement);
     if (!replaced) {

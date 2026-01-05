@@ -13,6 +13,15 @@ import {
   addSkillFactoryToPptx,
   getSkillFactoryScaffold,
 } from "./pptx/skillFactory";
+import {
+  addTeamColumn,
+  addTeamRow,
+  createDefaultSkillFactoryForm,
+  removeTeamColumn,
+  removeTeamRow,
+  updateTeamCell,
+  updateTeamColumnHeader,
+} from "./pptx/skillFactoryModel";
 
 /**
  * Returns true when UI debug logging is enabled.
@@ -47,8 +56,11 @@ function App() {
   const [detectionInfo, setDetectionInfo] = useState(null);
 
   // Skill Factory state
-  const [skillFactories, setSkillFactories] = useState([]); // [{ kind, label }]
+  const [skillFactories, setSkillFactories] = useState([]); // [{ kind, label, slide1 }]
   const [selectedFactoryKind, setSelectedFactoryKind] = useState("java"); // java | dataEngineering
+  const [skillFactoryForm, setSkillFactoryForm] = useState(
+    createDefaultSkillFactoryForm()
+  );
 
   // Pipeline step visibility (to avoid blank preview and aid debugging)
   const [pipeline, setPipeline] = useState({
@@ -345,6 +357,276 @@ function App() {
               </div>
             ) : null}
 
+            <div className="field-row">
+              <div className="field">
+                <div className="skill-factory-panel" aria-label="Skill Factory slide 1 fields">
+                  <div className="skill-factory-panel-head">
+                    <div className="skill-factory-panel-title">Skill Factory — Slide 1</div>
+                    <div className="skill-factory-panel-subtitle">
+                      These fields populate the Skill Factory slide(s) inserted only after you click{" "}
+                      <strong>Add Skill Factory</strong>.
+                    </div>
+                  </div>
+
+                  <div className="sf-grid">
+                    <label className="sf-field">
+                      <span className="sf-label">Skill Factory name (after “Digital Applications:”)</span>
+                      <input
+                        className="sf-input"
+                        type="text"
+                        value={skillFactoryForm.factoryName}
+                        onChange={(e) =>
+                          setSkillFactoryForm((p) => ({ ...p, factoryName: e.target.value }))
+                        }
+                        placeholder="e.g., Java"
+                      />
+                    </label>
+
+                    <div className="sf-row-3">
+                      <label className="sf-field">
+                        <span className="sf-label">Sprint number</span>
+                        <input
+                          className="sf-input"
+                          type="text"
+                          value={skillFactoryForm.sprintNumber}
+                          onChange={(e) =>
+                            setSkillFactoryForm((p) => ({ ...p, sprintNumber: e.target.value }))
+                          }
+                          placeholder="e.g., 14"
+                        />
+                      </label>
+
+                      <label className="sf-field">
+                        <span className="sf-label">Sprint start date</span>
+                        <input
+                          className="sf-input"
+                          type="date"
+                          value={skillFactoryForm.sprintStartISO}
+                          onChange={(e) =>
+                            setSkillFactoryForm((p) => ({ ...p, sprintStartISO: e.target.value }))
+                          }
+                        />
+                      </label>
+
+                      <label className="sf-field">
+                        <span className="sf-label">Sprint end date</span>
+                        <input
+                          className="sf-input"
+                          type="date"
+                          value={skillFactoryForm.sprintEndISO}
+                          onChange={(e) =>
+                            setSkillFactoryForm((p) => ({ ...p, sprintEndISO: e.target.value }))
+                          }
+                        />
+                      </label>
+                    </div>
+
+                    <div className="sf-two-col">
+                      <label className="sf-field">
+                        <span className="sf-label">Project Highlights (one per line)</span>
+                        <textarea
+                          className="sf-textarea"
+                          rows={5}
+                          value={skillFactoryForm.projectHighlightsText}
+                          onChange={(e) =>
+                            setSkillFactoryForm((p) => ({
+                              ...p,
+                              projectHighlightsText: e.target.value,
+                            }))
+                          }
+                          placeholder={"• Item 1\n• Item 2"}
+                        />
+                      </label>
+
+                      <label className="sf-field">
+                        <span className="sf-label">Project Lowlights (one per line)</span>
+                        <textarea
+                          className="sf-textarea"
+                          rows={5}
+                          value={skillFactoryForm.projectLowlightsText}
+                          onChange={(e) =>
+                            setSkillFactoryForm((p) => ({
+                              ...p,
+                              projectLowlightsText: e.target.value,
+                            }))
+                          }
+                          placeholder={"• Item 1\n• Item 2"}
+                        />
+                      </label>
+                    </div>
+
+                    <div className="sf-section">
+                      <div className="sf-section-title">Team Members</div>
+
+                      <div className="sf-table-actions">
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          type="button"
+                          onClick={() =>
+                            setSkillFactoryForm((p) => ({
+                              ...p,
+                              teamTable: addTeamRow(p.teamTable),
+                            }))
+                          }
+                        >
+                          + Row
+                        </button>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          type="button"
+                          onClick={() =>
+                            setSkillFactoryForm((p) => ({
+                              ...p,
+                              teamTable: addTeamColumn(p.teamTable, "New Column"),
+                            }))
+                          }
+                        >
+                          + Column
+                        </button>
+                      </div>
+
+                      <div className="sf-table-wrap" role="region" aria-label="Team members table">
+                        <table className="sf-table">
+                          <thead>
+                            <tr>
+                              {skillFactoryForm.teamTable.columns.map((c, colIdx) => (
+                                <th key={`h-${colIdx}`}>
+                                  <div className="sf-th">
+                                    <input
+                                      className="sf-input sf-th-input"
+                                      type="text"
+                                      value={c}
+                                      onChange={(e) =>
+                                        setSkillFactoryForm((p) => ({
+                                          ...p,
+                                          teamTable: updateTeamColumnHeader(
+                                            p.teamTable,
+                                            colIdx,
+                                            e.target.value
+                                          ),
+                                        }))
+                                      }
+                                    />
+                                    <button
+                                      className="sf-icon-btn"
+                                      type="button"
+                                      aria-label={`Remove column ${colIdx + 1}`}
+                                      onClick={() =>
+                                        setSkillFactoryForm((p) => ({
+                                          ...p,
+                                          teamTable: removeTeamColumn(p.teamTable, colIdx),
+                                        }))
+                                      }
+                                    >
+                                      ×
+                                    </button>
+                                  </div>
+                                </th>
+                              ))}
+                              <th className="sf-actions-col" aria-hidden="true" />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {skillFactoryForm.teamTable.rows.map((row, rowIdx) => (
+                              <tr key={`r-${rowIdx}`}>
+                                {skillFactoryForm.teamTable.columns.map((_, colIdx) => (
+                                  <td key={`c-${rowIdx}-${colIdx}`}>
+                                    <input
+                                      className="sf-input sf-cell-input"
+                                      type="text"
+                                      value={row[colIdx] ?? ""}
+                                      onChange={(e) =>
+                                        setSkillFactoryForm((p) => ({
+                                          ...p,
+                                          teamTable: updateTeamCell(
+                                            p.teamTable,
+                                            rowIdx,
+                                            colIdx,
+                                            e.target.value
+                                          ),
+                                        }))
+                                      }
+                                    />
+                                  </td>
+                                ))}
+                                <td className="sf-actions-col">
+                                  <button
+                                    className="sf-icon-btn"
+                                    type="button"
+                                    aria-label={`Remove row ${rowIdx + 1}`}
+                                    onClick={() =>
+                                      setSkillFactoryForm((p) => ({
+                                        ...p,
+                                        teamTable: removeTeamRow(p.teamTable, rowIdx),
+                                      }))
+                                    }
+                                  >
+                                    ×
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <label className="sf-field" style={{ marginTop: 10 }}>
+                        <span className="sf-label">SME name (shown below the table)</span>
+                        <input
+                          className="sf-input"
+                          type="text"
+                          value={skillFactoryForm.smeName}
+                          onChange={(e) =>
+                            setSkillFactoryForm((p) => ({ ...p, smeName: e.target.value }))
+                          }
+                          placeholder="e.g., John Smith"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="sf-two-col">
+                      <label className="sf-field">
+                        <span className="sf-label">Key Activities completed (previous week)</span>
+                        <textarea
+                          className="sf-textarea"
+                          rows={5}
+                          value={skillFactoryForm.keyActivitiesCompletedText}
+                          onChange={(e) =>
+                            setSkillFactoryForm((p) => ({
+                              ...p,
+                              keyActivitiesCompletedText: e.target.value,
+                            }))
+                          }
+                          placeholder={"• Item 1\n• Item 2"}
+                        />
+                      </label>
+
+                      <label className="sf-field">
+                        <span className="sf-label">Key Activities planned (next week)</span>
+                        <textarea
+                          className="sf-textarea"
+                          rows={5}
+                          value={skillFactoryForm.keyActivitiesPlannedText}
+                          onChange={(e) =>
+                            setSkillFactoryForm((p) => ({
+                              ...p,
+                              keyActivitiesPlannedText: e.target.value,
+                            }))
+                          }
+                          placeholder={"• Item 1\n• Item 2"}
+                        />
+                      </label>
+                    </div>
+
+                    <div className="hint" style={{ marginTop: 6 }}>
+                      Slide header will format as:{" "}
+                      <code>Sprint N (DD MMM YYYY – DD MMM YYYY)</code>.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="actions">
               <button
                 className="btn btn-primary"
@@ -414,10 +696,14 @@ function App() {
                 onAddFactory: () => {
                   const scaffold = getSkillFactoryScaffold(selectedFactoryKind);
                   // Add only the factory descriptor; slide insertion happens in regeneration.
+                  // IMPORTANT: Default deck remains 2 slides until user clicks Add.
                   setSkillFactories((prev) => {
                     // Avoid duplicates of same kind for now.
                     if (prev.some((x) => x.kind === scaffold.kind)) return prev;
-                    return [...prev, { kind: scaffold.kind, label: scaffold.label }];
+                    return [
+                      ...prev,
+                      { kind: scaffold.kind, label: scaffold.label, slide1: skillFactoryForm },
+                    ];
                   });
                 },
                 addedFactories: skillFactories,
