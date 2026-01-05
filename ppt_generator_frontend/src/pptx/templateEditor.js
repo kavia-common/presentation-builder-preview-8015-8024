@@ -5,25 +5,17 @@ import { saveAs } from "file-saver";
  * STRICT TEMPLATE RULES (user requirements):
  * - The app ships with a built-in PPTX: `public/assets/template.pptx`.
  * - Slide 1 has fixed template layout; we may update ONLY:
- *    (a) the Slide 1 date text runs (editable), and
- *    (b) the label directly above the Name on Slide 1 to "TATA ELXSI" (locked/fixed).
+ *    (a) the Slide 1 date text runs (editable).
  * - Do NOT add new runs/paragraphs/shapes anywhere.
  * - Do NOT alter any other slides, and preserve the last slide byte-for-byte.
  *
  * Implementation approach (byte-preserving):
  * - Read `ppt/slides/slide1.xml` as a string (do not parse/re-serialize XML).
- * - Update only the inner text of existing <a:t> nodes:
- *    - 5 date runs (day/month/year splits)
- *    - the existing label text-runs above Name (previously "TATA") updated in-place
- * - Update ONLY paragraph properties for that existing label paragraph to match the
- *   screenshot (centered alignment). No new shapes/paragraphs/runs are created.
+ * - Update only the inner text of existing <a:t> nodes corresponding to the date runs.
  * - Do not modify any other file in the PPTX zip.
  *
  * IMPORTANT:
- * The "only date editable" constraint is preserved in the UI. The label update is
- * forced on generation to match the template requirement, but the mutation remains
- * extremely narrow: only specific existing <a:t> nodes are changed, and no new XML
- * nodes are introduced.
+ * This module must never modify Slide 1 labels/names or any other text besides the date.
  */
 
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
@@ -172,137 +164,8 @@ function getFirstATextNodeFromRun(runXml) {
 }
 
 /**
- * Replaces the Slide 1 label directly above the Name (in-place).
- *
- * Template structure (bundled template):
- * - There is a single paragraph with a single <a:r> whose <a:t> is "TATA"
- *   (shown above the "Name : Subrata B" line in the screenshot).
- *
- * Requirements:
- * - Replace only existing <a:t> inner text (no new runs/paragraphs/shapes).
- * - Copy style/spacing from template: by editing text only, we preserve font,
- *   weight, size, color, alignment, and positioning.
- *
- * Returns:
- * - updatedShapeXml
- * - allowedATextNodePairs for safety guard
- */
-function replaceSlide1LabelAboveNameInShape(shapeXml, targetValue) {
-  const { scopeXml, scopeOffset, paragraphs } = collectParagraphsFromShape(shapeXml);
-  if (!paragraphs.length) {
-    throw new Error("Strict template mismatch: label shape contains no paragraphs.");
-  }
-
-  // Strictly find the paragraph that contains exactly the "TATA" <a:t>.
-  // We keep this conservative to avoid accidentally touching other text nodes.
-  const paragraphIndex = paragraphs.findIndex((p) =>
-    p.xml.includes("<a:t>TATA</a:t>")
-  );
-  if (paragraphIndex < 0) {
-    throw new Error(
-      'Strict template mismatch: could not find the expected "TATA" label paragraph in slide 1.'
-    );
-  }
-
-  const paragraphXmlOriginal = paragraphs[paragraphIndex].xml;
-
-  // Ensure the label paragraph is centered like the screenshot (TATA ELXSI centered above Name).
-  // IMPORTANT: We do not create a new paragraph; we only edit the existing <a:pPr> (or inject one
-  // if missing) to set algn="ctr" and keep everything else byte-identical outside <a:t> and this
-  // label paragraph’s <a:pPr>.
-  const enforceCenteredParagraph = (pXml) => {
-    const hasPPr = /<a:pPr\b/.test(pXml);
-
-    if (hasPPr) {
-      // Modify existing a:pPr tag in-place, preserving other attributes/children.
-      // If algn is already present, replace its value; otherwise inject algn="ctr" into the tag.
-      return pXml.replace(/<a:pPr\b([^>]*)>/, (full, attrs) => {
-        if (/\balgn="/.test(attrs)) {
-          const nextAttrs = attrs.replace(/\balgn="[^"]*"/, 'algn="ctr"');
-          return `<a:pPr${nextAttrs}>`;
-        }
-        return `<a:pPr${attrs} algn="ctr">`;
-      });
-    }
-
-    // No a:pPr: inject a minimal one immediately after <a:p ...>
-    // This does not create a new paragraph; it only adds paragraph properties to the existing one.
-    return pXml.replace(/<a:p\b([^>]*)>/, `<a:p$1><a:pPr algn="ctr"/>`);
-  };
-
-  const paragraphXml = enforceCenteredParagraph(paragraphXmlOriginal);
-
-  const runs = collectRunsFromParagraph(paragraphXml).map((runXml) => ({
-    xml: runXml,
-    tText: getFirstATextFromRun(runXml),
-    hasText: /<a:t\b/.test(runXml),
-  }));
-
-  // Expect exactly one run with a:t="TATA" for this label paragraph.
-  const textRuns = runs.filter((r) => r.hasText);
-  const isStrictLabel =
-    textRuns.length === 1 && textRuns[0].tText === "TATA" && runs.length >= 1;
-
-  if (!isStrictLabel) {
-    throw new Error(
-      'Strict template mismatch: label paragraph runs differ from expected template; refusing to modify.'
-    );
-  }
-
-  const updatedRunsXml = runs.map((r) => r.xml);
-  const originalNode = getFirstATextNodeFromRun(textRuns[0].xml);
-  if (!originalNode) {
-    throw new Error(
-      "Strict template mismatch: could not locate <a:t> node for label run."
-    );
-  }
-
-  const newValueEscaped = escapeXmlText(targetValue);
-  const updatedNode = originalNode.replace(
-    /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
-    `$1${newValueEscaped}$3`
-  );
-
-  // Replace within the matching run.
-  const runIdx = runs.findIndex((r) => r.xml === textRuns[0].xml);
-  updatedRunsXml[runIdx] = updatedRunsXml[runIdx].replace(originalNode, updatedNode);
-
-  // Rebuild paragraph preserving exact non-run content around the run region.
-  const firstRunIdx = paragraphXml.search(/<a:r\b/);
-  const lastRunEnd = paragraphXml.lastIndexOf("</a:r>");
-  if (firstRunIdx < 0 || lastRunEnd < 0) {
-    throw new Error(
-      "Strict template mismatch: could not parse label paragraph runs."
-    );
-  }
-  const runRegionEnd = lastRunEnd + "</a:r>".length;
-  const pHead = paragraphXml.slice(0, firstRunIdx);
-  const pTail = paragraphXml.slice(runRegionEnd);
-  const updatedParagraphXml = `${pHead}${updatedRunsXml.join("")}${pTail}`;
-
-  const paraStartInScope = paragraphs[paragraphIndex].startInScope;
-  const paraEndInScope = paragraphs[paragraphIndex].endInScope;
-
-  const updatedScopeXml =
-    scopeXml.slice(0, paraStartInScope) +
-    updatedParagraphXml +
-    scopeXml.slice(paraEndInScope);
-
-  const updatedShapeXml =
-    shapeXml.slice(0, scopeOffset) +
-    updatedScopeXml +
-    shapeXml.slice(scopeOffset + scopeXml.length);
-
-  return {
-    updatedShapeXml,
-    allowedATextNodePairs: [{ originalNode, updatedNode }],
-  };
-}
-
-/**
  * Verifies that differences between originalSlide1Xml and updatedSlide1Xml
- * occur ONLY within the inner text of the intended date <a:t> nodes on slide 1
- * plus any explicitly allowed additional <a:t> node replacements.
+ * occur ONLY within the inner text of the intended date <a:t> nodes on slide 1.
  *
  * This avoids brittle positional diffs (day can change 2 digits -> 1 digit, shifting
  * subsequent characters and causing false positives).
@@ -312,7 +175,6 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
   updatedSlide1Xml,
   dateParagraphXmlOriginal,
   allowedDateRunIndexes,
-  allowedAdditionalATextNodePairs = [],
 }) {
   if (originalSlide1Xml === updatedSlide1Xml) return;
 
@@ -323,33 +185,13 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
   const nextNodes = updatedSlide1Xml.match(aTextRe) ?? [];
   if (origNodes.length !== nextNodes.length) {
     throw new Error(
-      "Safety check failed: slide1.xml <a:t> node count changed. Only date/allowed text nodes may change."
+      "Safety check failed: slide1.xml <a:t> node count changed. Only date text nodes may change."
     );
   }
 
-  // 2) Non-<a:t> parts must match exactly, EXCEPT we allow a very specific
-  // label-paragraph <a:pPr> alignment change (to center) for the "TATA" label paragraph.
-  //
-  // We implement this by normalizing both XML strings to remove/standardize:
-  // - the <a:pPr ...> inside the paragraph that contains "<a:t>TATA</a:t>"
-  // Then we compare the remaining structure parts byte-for-byte.
-  const normalizeForAllowedLabelPPr = (xml) => {
-    // Find the paragraph containing the label node by anchoring on the (pre-replacement) text.
-    // This ensures we only relax matching around the intended label paragraph properties.
-    const paraRe = /<a:p\b[\s\S]*?<\/a:p>/g;
-    const paras = xml.match(paraRe) ?? [];
-    const labelPara = paras.find((p) => p.includes("<a:t>TATA</a:t>")) ?? null;
-    if (!labelPara) return xml;
-
-    const stripped = labelPara.replace(/<a:pPr\b[\s\S]*?<\/a:pPr>/g, "");
-    return xml.replace(labelPara, stripped);
-  };
-
-  const normOrig = normalizeForAllowedLabelPPr(originalSlide1Xml);
-  const normNext = normalizeForAllowedLabelPPr(updatedSlide1Xml);
-
-  const origParts = normOrig.split(aTextRe);
-  const nextParts = normNext.split(aTextRe);
+  // 2) Non-<a:t> parts must match exactly (no paragraph/shape/layout edits).
+  const origParts = originalSlide1Xml.split(aTextRe);
+  const nextParts = updatedSlide1Xml.split(aTextRe);
   if (origParts.length !== nextParts.length) {
     throw new Error(
       "Safety check failed: slide1.xml structure changed (unexpected <a:t> segmentation)."
@@ -358,7 +200,7 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
   for (let i = 0; i < origParts.length; i += 1) {
     if (origParts[i] !== nextParts[i]) {
       throw new Error(
-        "Safety check failed: slide1.xml changed outside <a:t> nodes (and outside the allowed label paragraph <a:pPr>). Only date/allowed text may change."
+        "Safety check failed: slide1.xml changed outside <a:t> nodes. Only date text may change."
       );
     }
   }
@@ -393,7 +235,6 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
 
   const allowedGlobalIndexes = new Set();
 
-  // Allow: the date nodes we are editing.
   for (const node of allowedLocalATextNodes) {
     const q = queues.get(node) ?? [];
     if (!q.length) {
@@ -404,30 +245,12 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
     allowedGlobalIndexes.add(q.shift());
   }
 
-  // Allow: additional <a:t> nodes explicitly expected to change (label above Name).
-  for (const pair of allowedAdditionalATextNodePairs) {
-    const q = queues.get(pair.originalNode) ?? [];
-    if (!q.length) {
-      throw new Error(
-        "Safety check failed: could not map allowed <a:t> node to global index in slide1.xml."
-      );
-    }
-    const globalIdx = q.shift();
-    allowedGlobalIndexes.add(globalIdx);
-
-    if (nextNodes[globalIdx] !== pair.updatedNode) {
-      throw new Error(
-        "Safety check failed: allowed <a:t> node did not match expected updated value."
-      );
-    }
-  }
-
   // 4) All <a:t> nodes except the allowed ones must be identical byte-for-byte.
   for (let i = 0; i < origNodes.length; i += 1) {
     if (allowedGlobalIndexes.has(i)) continue;
     if (origNodes[i] !== nextNodes[i]) {
       throw new Error(
-        "Safety check failed: slide1.xml modified in a non-date/non-allowed <a:t> node. Only date is editable; label above Name is fixed to a constant."
+        "Safety check failed: slide1.xml modified in a non-date <a:t> node. Only date is editable."
       );
     }
   }
@@ -435,13 +258,10 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
 
 /**
  * PUBLIC_INTERFACE
- * Updates ONLY the date field on slide 1 for the shipped default template,
- * and also forces the label above Name to "TATA ELXSI" (in-place).
+ * Updates ONLY the date field on slide 1 for the shipped default template.
  *
  * Guarantees:
- * - slide1.xml is identical except for:
- *   - the targeted date <a:t> nodes, and
- *   - the label-above-Name <a:t> node updated in-place ("TATA" -> "TATA ELXSI").
+ * - slide1.xml is identical except for the targeted date <a:t> nodes.
  * - Does not alter any <a:rPr>, paragraph properties, shape geometry, or layout.
  * - Does not change any other files; last slide stays byte-identical.
  *
@@ -466,28 +286,8 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const slide1XmlOriginal = await slide1File.async("string");
 
   // Slide 1 edits operate only on slide1.xml.
-  // 1) Fix label above Name to "TATA ELXSI" in-place (no new runs/paragraphs/shapes).
-  const shapes = collectShapeBlocks(slide1XmlOriginal);
-  const labelCandidates = shapes.filter((s) => s.xml.includes("<a:t>TATA</a:t>"));
-  if (labelCandidates.length !== 1) {
-    throw new Error(
-      'Strict template mismatch: could not uniquely locate the Slide 1 label above Name (expected a single "TATA" label node).'
-    );
-  }
-
-  const labelShape = labelCandidates[0];
-  const {
-    updatedShapeXml: updatedLabelShapeXml,
-    allowedATextNodePairs: allowedLabelATextNodePairs,
-  } = replaceSlide1LabelAboveNameInShape(labelShape.xml, "TATA ELXSI");
-
-  const slide1XmlAfterLabel =
-    slide1XmlOriginal.slice(0, labelShape.start) +
-    updatedLabelShapeXml +
-    slide1XmlOriginal.slice(labelShape.end);
-
-  // 2) Update Date runs (editable) in-place.
-  const shapesAfterLabel = collectShapeBlocks(slide1XmlAfterLabel);
+  // 1) Update Date runs (editable) in-place.
+  const shapesAfterLabel = collectShapeBlocks(slide1XmlOriginal);
   const dateLabelCandidates = shapesAfterLabel.filter((s) =>
     s.xml.includes("Date</a:t>")
   );
@@ -622,18 +422,17 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     shape.xml.slice(scopeOffset + scopeXml.length);
 
   const updatedSlide1Xml =
-    slide1XmlAfterLabel.slice(0, shape.start) +
+    slide1XmlOriginal.slice(0, shape.start) +
     updatedShapeXml +
-    slide1XmlAfterLabel.slice(shape.end);
+    slide1XmlOriginal.slice(shape.end);
 
-  // Guard: allow only the 5 intended date <a:t> nodes AND the label node.
+  // Guard: allow only the 5 intended date <a:t> nodes.
   // Everything else in slide1.xml must remain byte-for-byte identical (structure preserved).
   verifyOnlyAllowedSlide1DiffsByATextNodes({
     originalSlide1Xml: slide1XmlOriginal,
     updatedSlide1Xml,
     dateParagraphXmlOriginal: paragraphXml,
     allowedDateRunIndexes: dateRunIndexes,
-    allowedAdditionalATextNodePairs: allowedLabelATextNodePairs,
   });
 
   zip.file(SLIDE1_PATH, updatedSlide1Xml);
@@ -643,7 +442,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   return {
     updatedPptxBytes: out,
     detected: {
-      mode: "strict-template/date-only + fixed-label-above-name-node-guard",
+      mode: "strict-template/date-only",
       slidePath: SLIDE1_PATH,
       shapeName,
       shapeId,

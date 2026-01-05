@@ -18,19 +18,24 @@ if (!global.URL.revokeObjectURL) {
  * - Individual tests may still override global.fetch (e.g., to inject a minimal zip).
  * - This polyfill only handles GET /assets/template.pptx and otherwise throws.
  */
-if (!global.fetch) {
+/**
+ * Ensure fetch() exists in Jest/JSDOM for /assets/template.pptx.
+ *
+ * Some Jest environments provide a partial fetch; we still wrap it to guarantee
+ * `arrayBuffer()` works for the bundled template fetch used by the app + renderer tests.
+ */
+{
   // eslint-disable-next-line no-undef
   const fs = require("fs");
   // eslint-disable-next-line no-undef
   const path = require("path");
 
-  global.fetch = jest.fn(async (input) => {
+  const prevFetch = global.fetch;
+
+  global.fetch = jest.fn(async (input, init) => {
     const url = String(input || "");
     if (url === "/assets/template.pptx") {
-      const abs = path.resolve(
-        __dirname,
-        "../public/assets/template.pptx"
-      );
+      const abs = path.resolve(__dirname, "../public/assets/template.pptx");
       const buf = fs.readFileSync(abs);
       return {
         ok: true,
@@ -39,6 +44,7 @@ if (!global.fetch) {
           buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
       };
     }
+    if (prevFetch) return await prevFetch(input, init);
     throw new Error(`setupTests fetch polyfill: unhandled url: ${url}`);
   });
 }

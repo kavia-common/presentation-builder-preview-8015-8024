@@ -45,6 +45,7 @@ async function makeMinimalPptxArrayBuffer() {
 }
 
 describe("PPTX preview regeneration", () => {
+  // Date-only regression suite (Slide 1 date editable; no label/name edits).
   test("changing the date regenerates the blob URL and keeps a visible Open/Download link", async () => {
     const prevFetch = global.fetch;
 
