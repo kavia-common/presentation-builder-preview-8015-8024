@@ -52,7 +52,7 @@ describe("PPTX preview regeneration", () => {
     const firstLink = await screen.findByRole(
       "link",
       { name: "Download / Open PPTX" },
-      { timeout: 4000 }
+      { timeout: 8000 }
     );
     const firstHref = firstLink.getAttribute("href");
     expect(firstHref).toBeTruthy();

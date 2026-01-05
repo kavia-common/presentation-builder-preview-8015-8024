@@ -7,20 +7,21 @@ import JSZip from "jszip";
  * - It NEVER modifies PPTX bytes.
  * - It renders a single slide to an SVG data URL.
  *
- * Rendering strategy:
- * 1) Render solid background fills for shapes (when present).
- * 2) Render picture shapes using slide relationships (<p:pic> -> r:embed target).
- * 3) Render text from shapes (<p:sp>) with a best-effort mapping of:
+ * Rendering strategy (best-effort, deterministic):
+ * 1) Render a base slide background fill.
+ * 2) Render shape fills (solid) behind content (when present).
+ * 3) Render picture shapes using slide relationships (<p:pic> -> r:embed target),
+ *    honoring common crop rectangles to better match PowerPoint's view.
+ * 4) Render text from shapes (<p:sp>) with a best-effort mapping of:
  *    - position and size (EMU -> px)
  *    - font size, family, weight, italic, underline, color
+ *    - letter spacing (rPr spc) to match template fidelity (THANK YOU slide)
  *    - alignment (left/center/right)
  *
  * Notes:
- * - This is not a full PowerPoint renderer; it is a deterministic, read-only
- *   preview aimed at matching the bundled default template, including the last
- *   slide shown in the user screenshot.
- * - We keep Slide 1 date-only editing logic elsewhere; this module does not
- *   inspect/alter slide 1 beyond read-only rendering.
+ * - This is not a full PowerPoint renderer. It is tuned for the bundled template
+ *   and especially the final "THANK YOU" slide fidelity.
+ * - Slide 1 date-only editing logic lives elsewhere; this module is purely read-only.
  */
 
 // PPTX default unit: EMU
@@ -102,9 +103,9 @@ function escapeXmlAttr(text) {
     .replaceAll("'", "&apos;");
 }
 
-function parseColorFromSrbgClr(spPrXml) {
+function parseColorFromSrbgClr(scopeXml) {
   // Most common: <a:srgbClr val="RRGGBB"/>
-  const m = spPrXml.match(/<a:srgbClr\b[^>]*\bval="([0-9A-Fa-f]{6})"/);
+  const m = scopeXml.match(/<a:srgbClr\b[^>]*\bval="([0-9A-Fa-f]{6})"/);
   return m ? `#${m[1]}` : null;
 }
 
@@ -122,24 +123,26 @@ function extractShapeTransformEmu(shapeXml) {
   };
 }
 
-function extractPicsFromSlideXml(slideXml) {
-  // Collect <p:pic> blocks, then find:
-  // - blip embed rId: <a:blip r:embed="rIdX" .../>
-  // - xfrm off/ext (EMU)
-  const pics = [];
-  const picRe = /<p:pic\b[\s\S]*?<\/p:pic>/g;
+function collectSpTreeChildren(slideXml) {
+  /**
+   * Extracts the immediate children of <p:spTree> in order as raw xml fragments.
+   * This preserves z-order significantly better than rendering by type groups.
+   */
+  const tree =
+    slideXml.match(/<p:spTree\b[\s\S]*?<\/p:spTree>/)?.[0] ?? "";
+  if (!tree) return [];
+  // Remove the wrapper tags and keep inner xml.
+  const inner = tree
+    .replace(/^<p:spTree\b[\s\S]*?>/, "")
+    .replace(/<\/p:spTree>$/, "");
+
+  const children = [];
+  const childRe = /<(p:sp|p:pic|p:grpSp)\b[\s\S]*?<\/\1>/g;
   let m;
-  while ((m = picRe.exec(slideXml)) !== null) {
-    const picXml = m[0];
-    const embed =
-      picXml.match(/<a:blip\b[^>]*\br:embed="([^"]+)"/)?.[1] ?? null;
-
-    const { x, y, cx, cy } = extractShapeTransformEmu(picXml);
-
-    // Keep order as in XML (z-order approximated).
-    pics.push({ embed, x, y, cx, cy });
+  while ((m = childRe.exec(inner)) !== null) {
+    children.push(m[0]);
   }
-  return pics;
+  return children;
 }
 
 function collectShapeBlocks(slideXml) {
@@ -158,14 +161,14 @@ function extractShapeFillColor(shapeXml) {
   const spPr = shapeXml.match(/<p:spPr\b[\s\S]*?<\/p:spPr>/)?.[0] ?? "";
   if (!spPr) return null;
   if (!spPr.includes("<a:solidFill")) return null;
-  const c = parseColorFromSrbgClr(spPr);
-  return c;
+  return parseColorFromSrbgClr(spPr);
 }
 
 function extractTextRunsFromShape(shapeXml) {
   // Extract paragraph(s) from <p:txBody>. Preserve order.
   // Return [{ text, rPrXml, pPrXml, idxInParagraph, paragraphIndex }]
-  const txBody = shapeXml.match(/<p:txBody\b[\s\S]*?<\/p:txBody>/)?.[0] ?? "";
+  const txBody =
+    shapeXml.match(/<p:txBody\b[\s\S]*?<\/p:txBody>/)?.[0] ?? "";
   if (!txBody) return [];
 
   const paragraphs = txBody.match(/<a:p\b[\s\S]*?<\/a:p>/g) ?? [];
@@ -175,8 +178,9 @@ function extractTextRunsFromShape(shapeXml) {
     const pXml = paragraphs[pIndex];
     const pPrXml = pXml.match(/<a:pPr\b[\s\S]*?<\/a:pPr>/)?.[0] ?? "";
 
-    // Include <a:r> runs and also handle <a:fld> (fields) similarly if present.
-    const runMatches = pXml.match(/<(a:r|a:fld)\b[\s\S]*?<\/(a:r|a:fld)>/g) ?? [];
+    // Include <a:r> runs and also handle <a:fld> similarly.
+    const runMatches =
+      pXml.match(/<(a:r|a:fld)\b[\s\S]*?<\/(a:r|a:fld)>/g) ?? [];
     let runIdx = 0;
     for (const runXml of runMatches) {
       const tNodes = runXml.match(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g) ?? [];
@@ -185,7 +189,6 @@ function extractTextRunsFromShape(shapeXml) {
         continue;
       }
 
-      // Concatenate all <a:t> nodes within the run.
       const text = tNodes
         .map((n) => n.match(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/)?.[1] ?? "")
         .map(decodeXmlText)
@@ -209,22 +212,32 @@ function extractTextRunsFromShape(shapeXml) {
 
 function parseTextStyle({ rPrXml, pPrXml }) {
   // Defaults to something reasonable if style is missing.
-  const fontSizeHalfPoints = Number(rPrXml.match(/\bsz="(\d+)"/)?.[1] ?? 0);
-  const fontSizePx = fontSizeHalfPoints ? (fontSizeHalfPoints / 100) * 1.333 : 18; // rough: pt -> px
+  const fontSizeHundredthPoints = Number(
+    rPrXml.match(/\bsz="(\d+)"/)?.[1] ?? 0
+  );
+
+  // PPTX sz is in 1/100 points. Convert: points -> px (1pt ≈ 1.333px)
+  const fontSizePx = fontSizeHundredthPoints
+    ? (fontSizeHundredthPoints / 100) * 1.333
+    : 18;
 
   const isBold = /\bb="1"/.test(rPrXml);
   const isItalic = /\bi="1"/.test(rPrXml);
   const isUnderline = /\bu="(sng|dbl)"/.test(rPrXml);
 
-  const latin = rPrXml.match(/<a:latin\b[^>]*\btypeface="([^"]+)"/)?.[1] ?? "";
+  const latin =
+    rPrXml.match(/<a:latin\b[^>]*\btypeface="([^"]+)"/)?.[1] ?? "";
   const fontFamily = latin || "Arial, sans-serif";
 
   const colorHex = (() => {
     // Prefer run color
-    const runClr = rPrXml.match(/<a:srgbClr\b[^>]*\bval="([0-9A-Fa-f]{6})"/)?.[1];
+    const runClr =
+      rPrXml.match(/<a:srgbClr\b[^>]*\bval="([0-9A-Fa-f]{6})"/)?.[1];
     if (runClr) return `#${runClr}`;
-    // Could also be theme-based; omit theme parsing for now.
-    return "#111827";
+
+    // Many template runs omit explicit color; for this project we bias towards
+    // a strong, near-black used on the last slide ("THANK YOU" is #0D0D0D).
+    return "#0D0D0D";
   })();
 
   const align = (() => {
@@ -235,6 +248,16 @@ function parseTextStyle({ rPrXml, pPrXml }) {
     return "start";
   })();
 
+  const letterSpacingPx = (() => {
+    // rPr spc is in 1/1000 em (per ECMA-376). For SVG we convert to px:
+    // letterSpacingPx ~= (spc/1000) * fontSizePx
+    const spc = rPrXml.match(/\bspc="(-?\d+)"/)?.[1];
+    if (!spc) return 0;
+    const v = Number(spc);
+    if (!Number.isFinite(v)) return 0;
+    return (v / 1000) * fontSizePx;
+  })();
+
   return {
     fontSizePx,
     fontFamily,
@@ -243,6 +266,7 @@ function parseTextStyle({ rPrXml, pPrXml }) {
     textDecoration: isUnderline ? "underline" : "none",
     fill: colorHex,
     textAnchor: align,
+    letterSpacingPx,
   };
 }
 
@@ -254,7 +278,7 @@ function parseLeftInsetEmu(pPrXml) {
 
 function extractShapeTextBodyInsetsEmu(shapeXml) {
   // <a:bodyPr lIns=".." tIns=".." rIns=".." bIns=".."/>
-  const bodyPr = shapeXml.match(/<a:bodyPr\b[^>]*\/>/)?.[0] ?? "";
+  const bodyPr = shapeXml.match(/<a:bodyPr\b[^>]*>/)?.[0] ?? "";
   const lIns = Number(bodyPr.match(/\blIns="(\d+)"/)?.[1] ?? 0);
   const tIns = Number(bodyPr.match(/\btIns="(\d+)"/)?.[1] ?? 0);
   const rIns = Number(bodyPr.match(/\brIns="(\d+)"/)?.[1] ?? 0);
@@ -265,7 +289,58 @@ function extractShapeTextBodyInsetsEmu(shapeXml) {
 function normalizeWhitespaceForSvg(text) {
   // Keep intentional spaces while avoiding SVG collapsing runs too aggressively.
   // PowerPoint often uses NBSP; map to space and preserve sequences via CSS.
-  return String(text ?? "").replaceAll("\u00a0", " ");
+  return String(text ?? "")
+    .replaceAll("\u00a0", " ")
+    // PPTX can include literal tab runs (as seen in THANK\tYOU); map to spaces.
+    .replaceAll("\t", "    ");
+}
+
+function extractPicCropFractions(picXml) {
+  /**
+   * Extract crop fractions from <a:srcRect l="" t="" r="" b=""/> if present.
+   * Values are in 1/1000 percent (0..100000). We convert to [0..1] fractions.
+   */
+  const srcRect = picXml.match(/<a:srcRect\b[^>]*\/>/)?.[0] ?? "";
+  if (!srcRect) return null;
+
+  const l = Number(srcRect.match(/\bl="(\d+)"/)?.[1] ?? 0);
+  const t = Number(srcRect.match(/\bt="(\d+)"/)?.[1] ?? 0);
+  const r = Number(srcRect.match(/\br="(\d+)"/)?.[1] ?? 0);
+  const b = Number(srcRect.match(/\bb="(\d+)"/)?.[1] ?? 0);
+
+  const toFrac = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return Math.min(1, n / 100000);
+  };
+
+  return { l: toFrac(l), t: toFrac(t), r: toFrac(r), b: toFrac(b) };
+}
+
+function extractPicFromPicXml(picXml) {
+  // Find:
+  // - blip embed rId: <a:blip r:embed="rIdX" .../>
+  // - xfrm off/ext (EMU)
+  const embed =
+    picXml.match(/<a:blip\b[^>]*\br:embed="([^"]+)"/)?.[1] ?? null;
+
+  const { x, y, cx, cy } = extractShapeTransformEmu(picXml);
+  const crop = extractPicCropFractions(picXml);
+
+  return { embed, x, y, cx, cy, crop };
+}
+
+function mimeFromZipPath(zipPath) {
+  const ext = zipPath.split(".").pop()?.toLowerCase() ?? "";
+  return ext === "png"
+    ? "image/png"
+    : ext === "jpg" || ext === "jpeg"
+      ? "image/jpeg"
+      : ext === "gif"
+        ? "image/gif"
+        : ext === "svg"
+          ? "image/svg+xml"
+          : "application/octet-stream";
 }
 
 /**
@@ -342,148 +417,204 @@ export async function renderSlideToSvgDataUrl(pptxBytes, slideIndex, options = {
   const widthPx = Math.max(320, Math.floor(options.widthPx ?? 1040));
   const heightPx = Math.floor((widthPx * slideSize.cy) / slideSize.cx);
 
-  // 1) Shapes (background fills behind content)
-  const shapeEls = [];
-  const shapeBlocks = collectShapeBlocks(slideXml);
-  for (const shapeXml of shapeBlocks) {
-    const fill = extractShapeFillColor(shapeXml);
-    if (!fill) continue;
+  // Helpers for EMU->px.
+  const pxX = (emu) => emuToPxX(emu, slideSize, widthPx);
+  const pxY = (emu) => emuToPxY(emu, slideSize, heightPx);
 
-    const { x, y, cx, cy } = extractShapeTransformEmu(shapeXml);
-    // Skip zero-sized shapes.
-    if (!cx || !cy) continue;
+  // Preserve render order by iterating spTree children when possible.
+  const spTreeChildren = collectSpTreeChildren(slideXml);
+  const fallbackShapeBlocks = collectShapeBlocks(slideXml);
+  const drawList = spTreeChildren.length ? spTreeChildren : fallbackShapeBlocks;
 
-    const rx = emuToPxX(x, slideSize, widthPx);
-    const ry = emuToPxY(y, slideSize, heightPx);
-    const rw = emuToPxX(cx, slideSize, widthPx);
-    const rh = emuToPxY(cy, slideSize, heightPx);
+  const backgroundEls = [];
+  const svgEls = [];
 
-    shapeEls.push(
-      `<rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" fill="${escapeXmlAttr(fill)}" />`
-    );
-  }
+  // Base slide background: white. (Template has white page; the photo is a picture on top.)
+  backgroundEls.push(
+    `<rect x="0" y="0" width="100%" height="100%" fill="#ffffff" />`
+  );
 
-  // 2) Pictures
-  const pics = extractPicsFromSlideXml(slideXml);
-  const imageEls = [];
-  for (const pic of pics) {
-    if (!pic.embed) continue;
-    const target = relsById.get(pic.embed);
-    const zipPath = resolveSlideRelTargetToZipPath(target);
-    if (!zipPath) continue;
+  // Iterate in order.
+  for (const nodeXml of drawList) {
+    if (nodeXml.startsWith("<p:sp")) {
+      // 1) Shape fill.
+      const fill = extractShapeFillColor(nodeXml);
+      if (fill) {
+        const { x, y, cx, cy } = extractShapeTransformEmu(nodeXml);
+        if (cx && cy) {
+          svgEls.push(
+            `<rect x="${pxX(x)}" y="${pxY(y)}" width="${pxX(cx)}" height="${pxY(
+              cy
+            )}" fill="${escapeXmlAttr(fill)}" />`
+          );
+        }
+      }
 
-    const imgFile = zip.file(zipPath);
-    if (!imgFile) continue;
+      // 2) Text (rendered per paragraph; within paragraph per run to support letter-spacing)
+      if (nodeXml.includes("<p:txBody")) {
+        const { x, y, cx, cy } = extractShapeTransformEmu(nodeXml);
+        if (cx && cy) {
+          const { lIns, tIns } = extractShapeTextBodyInsetsEmu(nodeXml);
 
-    const bytes = await imgFile.async("uint8array");
-    const ext = zipPath.split(".").pop()?.toLowerCase() ?? "";
-    const mime =
-      ext === "png"
-        ? "image/png"
-        : ext === "jpg" || ext === "jpeg"
-          ? "image/jpeg"
-          : ext === "gif"
-            ? "image/gif"
-            : ext === "svg"
-              ? "image/svg+xml"
-              : "application/octet-stream";
+          const boxX = pxX(x + lIns);
+          const boxY = pxY(y + tIns);
+          const boxW = pxX(Math.max(0, cx - lIns));
+          const boxH = pxY(Math.max(0, cy - tIns));
 
-    const b64 = safeB64FromBytes(bytes);
+          const runs = extractTextRunsFromShape(nodeXml);
+          if (!runs.length) continue;
 
-    const x = emuToPxX(pic.x, slideSize, widthPx);
-    const y = emuToPxY(pic.y, slideSize, heightPx);
-    const w = emuToPxX(pic.cx, slideSize, widthPx);
-    const h = emuToPxY(pic.cy, slideSize, heightPx);
+          // Group runs by paragraph.
+          const paragraphs = new Map();
+          for (const r of runs) {
+            const key = r.paragraphIndex;
+            const current = paragraphs.get(key) ?? { runs: [], seed: r };
+            current.runs.push(r);
+            paragraphs.set(key, current);
+          }
 
-    imageEls.push(
-      `<image x="${x}" y="${y}" width="${w}" height="${h}" href="data:${mime};base64,${b64}" preserveAspectRatio="none" />`
-    );
-  }
+          const sortedKeys = [...paragraphs.keys()].sort((a, b) => a - b);
 
-  // 3) Text (best effort; needed for the THANK YOU last slide screenshot)
-  const textEls = [];
-  for (const shapeXml of shapeBlocks) {
-    // Only render if it has a txBody.
-    if (!shapeXml.includes("<p:txBody")) continue;
+          // Improve baseline placement: start at top of the text box and add
+          // ascent-ish offset (0.85em) per line.
+          let cursorY = boxY;
 
-    const { x, y, cx, cy } = extractShapeTransformEmu(shapeXml);
-    if (!cx || !cy) continue;
+          for (const pIdx of sortedKeys) {
+            const p = paragraphs.get(pIdx);
+            if (!p) continue;
 
-    const { lIns, tIns } = extractShapeTextBodyInsetsEmu(shapeXml);
+            const seedStyle = parseTextStyle({ rPrXml: p.seed.rPrXml, pPrXml: p.seed.pPrXml });
+            const marL = parseLeftInsetEmu(p.seed.pPrXml);
+            const insetX = pxX(marL);
 
-    const boxX = emuToPxX(x + lIns, slideSize, widthPx);
-    const boxY = emuToPxY(y + tIns, slideSize, heightPx);
-    const boxW = emuToPxX(Math.max(0, cx - lIns), slideSize, widthPx);
-    const boxH = emuToPxY(Math.max(0, cy - tIns), slideSize, heightPx);
+            // Approx line height: 1.12 is closer to PPT default for the template.
+            const lineHeight = Math.max(1, seedStyle.fontSizePx * 1.12);
+            cursorY += lineHeight;
 
-    const runs = extractTextRunsFromShape(shapeXml);
-    if (!runs.length) continue;
+            let xPos = boxX + insetX;
+            if (seedStyle.textAnchor === "middle") xPos = boxX + boxW / 2;
+            if (seedStyle.textAnchor === "end") xPos = boxX + boxW;
 
-    // PowerPoint text layout is complex; we approximate line breaks by paragraph index.
-    // For each paragraph, join runs and render as a single <text> element.
-    const paragraphs = new Map();
-    for (const r of runs) {
-      const key = r.paragraphIndex;
-      const current = paragraphs.get(key) ?? { pieces: [], styleSeed: r, pPrXml: r.pPrXml };
-      current.pieces.push(r.text);
-      // Keep first run as style seed.
-      paragraphs.set(key, current);
+            // Baseline within the line.
+            const yPos = Math.min(boxY + boxH, cursorY - lineHeight * 0.18);
+
+            // Render each run as a <tspan> with its own style so we preserve
+            // letter-spacing differences (critical for THANK YOU).
+            const tspans = [];
+            for (const run of p.runs) {
+              const style = parseTextStyle({ rPrXml: run.rPrXml, pPrXml: run.pPrXml });
+              const text = normalizeWhitespaceForSvg(run.text);
+              if (!text) continue;
+
+              const parts = [];
+              parts.push(`<tspan`);
+              parts.push(` font-family="${escapeXmlAttr(style.fontFamily)}"`);
+              parts.push(` font-size="${style.fontSizePx}"`);
+              parts.push(` font-weight="${style.fontWeight}"`);
+              parts.push(` font-style="${escapeXmlAttr(style.fontStyle)}"`);
+              parts.push(
+                ` text-decoration="${escapeXmlAttr(style.textDecoration)}"`
+              );
+              parts.push(` fill="${escapeXmlAttr(style.fill)}"`);
+
+              // Per-run letter spacing.
+              if (Math.abs(style.letterSpacingPx) > 0.01) {
+                parts.push(` letter-spacing="${style.letterSpacingPx}"`);
+              }
+
+              // Keep x on the first tspan only; others flow naturally.
+              parts.push(`>`);
+              parts.push(`${escapeXmlAttr(text)}`);
+              parts.push(`</tspan>`);
+              tspans.push(parts.join(""));
+            }
+
+            if (!tspans.length) continue;
+
+            svgEls.push(
+              [
+                `<text x="${xPos}" y="${yPos}"`,
+                ` text-anchor="${escapeXmlAttr(seedStyle.textAnchor)}"`,
+                // Preserve whitespace and prevent run collapsing.
+                ` style="white-space: pre;"`,
+                `>`,
+                tspans.join(""),
+                `</text>`,
+              ].join("")
+            );
+          }
+        }
+      }
+      continue;
     }
 
-    const sortedKeys = [...paragraphs.keys()].sort((a, b) => a - b);
+    if (nodeXml.startsWith("<p:pic")) {
+      // Picture node
+      const pic = extractPicFromPicXml(nodeXml);
+      if (!pic.embed) continue;
 
-    // Line height heuristic: 1.2 * fontSize
-    let cursorY = boxY;
-    for (const pIdx of sortedKeys) {
-      const p = paragraphs.get(pIdx);
-      if (!p) continue;
+      const target = relsById.get(pic.embed);
+      const zipPath = resolveSlideRelTargetToZipPath(target);
+      if (!zipPath) continue;
 
-      const seed = p.styleSeed;
-      const style = parseTextStyle({ rPrXml: seed.rPrXml, pPrXml: seed.pPrXml });
-      const marL = parseLeftInsetEmu(seed.pPrXml);
-      const insetX = emuToPxX(marL, slideSize, widthPx);
+      const imgFile = zip.file(zipPath);
+      if (!imgFile) continue;
 
-      const lineHeight = Math.max(1, style.fontSizePx * 1.2);
-      cursorY += lineHeight;
+      const bytes = await imgFile.async("uint8array");
+      const mime = mimeFromZipPath(zipPath);
+      const b64 = safeB64FromBytes(bytes);
 
-      // anchor in X depends on alignment; use boxW to compute.
-      let xPos = boxX + insetX;
-      if (style.textAnchor === "middle") xPos = boxX + boxW / 2;
-      if (style.textAnchor === "end") xPos = boxX + boxW;
+      const x = pxX(pic.x);
+      const y = pxY(pic.y);
+      const w = pxX(pic.cx);
+      const h = pxY(pic.cy);
 
-      // SVG text y is baseline; this is a heuristic.
-      const yPos = Math.min(boxY + boxH, cursorY);
+      // Honor crop (common on the last slide background photo). We implement
+      // crop by clipping to the picture rect and scaling/offsetting the image
+      // inside to match the cropped region.
+      //
+      // srcRect fractions represent how much is cropped from each side.
+      // visibleW = (1 - l - r), visibleH = (1 - t - b)
+      // scale image by 1/visibleW & 1/visibleH and offset by -l/-t.
+      if (pic.crop && (pic.crop.l || pic.crop.r || pic.crop.t || pic.crop.b)) {
+        const visibleW = Math.max(0.0001, 1 - pic.crop.l - pic.crop.r);
+        const visibleH = Math.max(0.0001, 1 - pic.crop.t - pic.crop.b);
+        const imgW = w / visibleW;
+        const imgH = h / visibleH;
 
-      const text = normalizeWhitespaceForSvg(p.pieces.join(""));
-      if (!text.trim()) continue;
+        const dx = x - imgW * pic.crop.l;
+        const dy = y - imgH * pic.crop.t;
 
-      textEls.push(
-        [
-          `<text x="${xPos}" y="${yPos}"`,
-          ` font-family="${escapeXmlAttr(style.fontFamily)}"`,
-          ` font-size="${style.fontSizePx}"`,
-          ` font-weight="${style.fontWeight}"`,
-          ` font-style="${escapeXmlAttr(style.fontStyle)}"`,
-          ` text-decoration="${escapeXmlAttr(style.textDecoration)}"`,
-          ` fill="${escapeXmlAttr(style.fill)}"`,
-          ` text-anchor="${escapeXmlAttr(style.textAnchor)}"`,
-          ` style="white-space: pre;"`,
-          `>`,
-          `${escapeXmlAttr(text)}`,
-          `</text>`,
-        ].join("")
-      );
+        const clipId = `clip_${slideIndex}_${Math.random().toString(16).slice(2)}`;
+        // Define clip path then draw transformed image inside it.
+        svgEls.push(
+          [
+            `<defs>`,
+            `<clipPath id="${clipId}">`,
+            `<rect x="${x}" y="${y}" width="${w}" height="${h}" />`,
+            `</clipPath>`,
+            `</defs>`,
+            `<image x="${dx}" y="${dy}" width="${imgW}" height="${imgH}"`,
+            ` href="data:${mime};base64,${b64}"`,
+            ` preserveAspectRatio="none"`,
+            ` clip-path="url(#${clipId})"`,
+            ` />`,
+          ].join("")
+        );
+      } else {
+        svgEls.push(
+          `<image x="${x}" y="${y}" width="${w}" height="${h}" href="data:${mime};base64,${b64}" preserveAspectRatio="none" />`
+        );
+      }
+
+      continue;
     }
+
+    // Group shapes not explicitly supported: ignore for now (rare in template)
   }
 
-  // Base slide background: white (template uses white background in screenshot).
-  // Then shape fills, then images, then text.
-  const svgLayers = [
-    `<rect x="0" y="0" width="100%" height="100%" fill="#ffffff" />`,
-    ...shapeEls,
-    ...imageEls,
-    ...textEls,
-  ];
+  // Compose layers: base bg, then everything in z-order.
+  const svgLayers = [...backgroundEls, ...svgEls];
 
   const svg = [
     `<?xml version="1.0" encoding="UTF-8"?>`,
