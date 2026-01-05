@@ -280,10 +280,11 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
  * Sets the static label text into the existing placeholder shape above the Name.
  *
  * IMPORTANT:
- * - Does NOT add a new paragraph or new line in the Name shape.
- * - Uses the existing placeholder/shape (template-specific: cNvPr id=8 name="object 8").
- * - Attempts to preserve styling by using an existing run/paragraph when present.
- * - If the placeholder has no runs, it will insert a single run into the existing paragraph.
+ * - This MUST preserve styling + precise placement from the PPT template (per latest image).
+ *   Therefore we ONLY replace text inside an existing <a:t> node of the existing shape.
+ * - We do NOT add paragraphs, do NOT add new runs, and do NOT change geometry.
+ * - If the placeholder has no existing <a:t>, we fail fast (strict template expectation),
+ *   because inserting nodes could alter layout/line breaks and risk overlap.
  */
 function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
   const shapes = collectShapeBlocks(slide1Xml);
@@ -312,49 +313,37 @@ function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
     throw new Error("Strict template mismatch: label placeholder contains no paragraphs.");
   }
 
-  // Prefer first paragraph.
+  // Use the first paragraph only; we must not introduce extra lines.
   const para = paragraphs[0];
   const paraXml = para.xml;
 
+  // STRICT: require an existing <a:t> node so we can preserve run styling + layout.
   const runs = collectRunsFromParagraph(paraXml);
+  const runIndexWithText = runs.findIndex((r) => /<a:t\b/.test(r));
 
-  let updatedParaXml = paraXml;
-
-  if (runs.length) {
-    // Replace first run's <a:t> if present; otherwise add <a:t> into the existing run.
-    // This avoids adding paragraphs/new lines that could change layout or overlap "Name".
-    const firstRun = runs[0];
-
-    if (/<a:t\b/.test(firstRun)) {
-      const replacedRun = firstRun.replace(
-        /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
-        `$1${escapeXmlText(STATIC_LABEL_TEXT)}$3`
-      );
-      updatedParaXml = paraXml.replace(firstRun, replacedRun);
-    } else {
-      // Run exists but has no <a:t> (rare). Insert <a:t> after rPr if present, else right after <a:r>.
-      const insertText = `<a:t>${escapeXmlText(STATIC_LABEL_TEXT)}</a:t>`;
-      const withText = firstRun.includes("</a:rPr>")
-        ? firstRun.replace("</a:rPr>", `</a:rPr>${insertText}`)
-        : firstRun.replace(/<a:r\b[^>]*>/, (m) => `${m}${insertText}`);
-      updatedParaXml = paraXml.replace(firstRun, withText);
-    }
-  } else {
-    // Paragraph has no runs: insert a single run into the existing paragraph (no new paragraphs).
-    const runXml = `<a:r><a:t>${escapeXmlText(STATIC_LABEL_TEXT)}</a:t></a:r>`;
-    if (updatedParaXml.includes("<a:endParaRPr")) {
-      updatedParaXml = updatedParaXml.replace(
-        "<a:endParaRPr",
-        `${runXml}<a:endParaRPr`
-      );
-    } else {
-      updatedParaXml = updatedParaXml.replace("</a:p>", `${runXml}</a:p>`);
-    }
+  if (runIndexWithText < 0) {
+    throw new Error(
+      "Strict template mismatch: label placeholder contains no <a:t> text runs; refusing to insert new runs to avoid layout/overlap changes."
+    );
   }
+
+  const targetRun = runs[runIndexWithText];
+
+  // Replace only the inner text of the FIRST <a:t> in the first text-bearing run.
+  // This preserves all styling (<a:rPr>), spacing, and shape geometry so placement
+  // remains exactly as in the template (and matches the latest screenshot).
+  const replacedRun = targetRun.replace(
+    /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
+    `$1${escapeXmlText(STATIC_LABEL_TEXT)}$3`
+  );
+
+  const updatedParaXml = paraXml.replace(targetRun, replacedRun);
 
   // Apply paragraph change inside txBody scope.
   const updatedScopeXml =
-    scopeXml.slice(0, para.startInScope) + updatedParaXml + scopeXml.slice(para.endInScope);
+    scopeXml.slice(0, para.startInScope) +
+    updatedParaXml +
+    scopeXml.slice(para.endInScope);
 
   const updatedShapeXml =
     shape.xml.slice(0, scopeOffset) +
