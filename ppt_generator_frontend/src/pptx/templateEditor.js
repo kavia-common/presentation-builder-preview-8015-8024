@@ -5,33 +5,35 @@ import { saveAs } from "file-saver";
  * STRICT TEMPLATE RULES (user requirements):
  * - The app ships with a built-in PPTX: `public/assets/template.pptx`.
  * - Slide 1 must remain byte-for-byte identical to the template EXCEPT for:
- *    (a) the date text content, AND
- *    (b) adding the non-editable label "TATA ELXSI" above the Name (Slide 1 only).
- * - Only the date text on Slide 1 is editable (i.e., changes across generations).
+ *    (a) the date text content (editable), AND
+ *    (b) replacing the existing text/empty placeholder directly above the Name
+ *        with the non-editable label "TATA ELXSI" (Slide 1 only).
+ * - Do NOT add a new line for the label and do NOT overlap the Name:
+ *   we must use the existing placeholder/shape that sits above the Name and set
+ *   its text to exactly "TATA ELXSI".
  * - Preserve the last slide exactly with no processing: we therefore do not
  *   modify any files except `ppt/slides/slide1.xml`.
  *
- * Implementation approach:
+ * Implementation approach (byte-preserving):
  * - Read `ppt/slides/slide1.xml` as a string (do not parse/re-serialize XML).
- * - Select the date text shape strictly by:
- *    1) containing "Date</a:t>" label
- *    2) (if multiple candidates) having the exact expected run sequence
- * - Select the Name text shape strictly by:
- *    1) containing "Name</a:t>" and the known name value in the template ("Subrata")
+ * - Ensure the "TATA ELXSI" label exists by targeting the existing shape
+ *   above Name in the bundled template (shape cNvPr id="8", name="object 8").
  * - Update only:
- *    - Insert a new first paragraph into the Name shape: "TATA ELXSI"
- *      using the existing shape's paragraph/run properties (formatting identical),
- *      and without changing any other bytes in slide1.xml.
- *    - Update only the existing <a:t> node values within the 5 date runs
- *      leaving all <a:rPr> and all XML untouched.
+ *    - the <a:t> value(s) within that label placeholder shape (slide 1 only),
+ *      without changing any geometry or adding paragraphs.
+ *    - the existing <a:t> node values within the 5 date runs.
  *
- * - Verify slide1.xml changes occur only within:
- *    - the inserted Name paragraph (exact insertion point), and
- *    - the 5 intended date <a:t> nodes (node-based guard).
+ * NOTE:
+ * - We intentionally keep the label non-editable: it is enforced to the same
+ *   string on every generation.
  */
 
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
 const STATIC_LABEL_TEXT = "TATA ELXSI";
+
+// Template-specific: the placeholder directly above the Name (verified in the bundled template).
+const LABEL_SHAPE_ID = "8";
+const LABEL_SHAPE_NAME = "object 8";
 
 /**
  * PUBLIC_INTERFACE
@@ -178,7 +180,7 @@ function getFirstATextNodeFromRun(runXml) {
 
 /**
  * Verifies that differences between originalSlide1Xml and updatedSlide1Xml
- * occur ONLY within the inner text of the 5 intended date <a:t> nodes on slide 1.
+ * occur ONLY within the inner text of the intended date <a:t> nodes on slide 1.
  *
  * This avoids brittle positional diffs (day can change 2 digits -> 1 digit, shifting
  * subsequent characters and causing false positives).
@@ -218,7 +220,7 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
     }
   }
 
-  // 3) Determine which global <a:t> nodes correspond to the 5 date runs.
+  // 3) Determine which global <a:t> nodes correspond to the intended date runs.
   const origParaPos = originalSlide1Xml.indexOf(dateParagraphXmlOriginal);
   if (origParaPos < 0) {
     throw new Error(
@@ -269,70 +271,79 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
 }
 
 /**
- * Inserts a static first paragraph into the Name shape, if not already present.
- * This is a byte-preserving string insertion that does not change existing XML.
+ * Sets the static label text into the existing placeholder shape above the Name.
  *
  * IMPORTANT:
- * - We do NOT alter any existing paragraphs/runs; we only insert a new <a:p> before them.
- * - We reuse the first paragraph's <a:pPr> and first run's <a:rPr> for identical formatting.
+ * - Does NOT add a new paragraph or new line in the Name shape.
+ * - Uses the existing placeholder/shape (template-specific: cNvPr id=8 name="object 8").
+ * - Attempts to preserve styling by using an existing run/paragraph when present.
+ * - If the placeholder has no runs, it will insert a single run into the existing paragraph.
  */
-function addStaticLabelAboveName({ slide1Xml }) {
+function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
   const shapes = collectShapeBlocks(slide1Xml);
 
-  // Strictly identify the Name shape by its known template contents.
-  const nameShapeCandidates = shapes.filter(
-    (s) => s.xml.includes("Name</a:t>") && s.xml.includes("Subrata</a:t>")
-  );
+  const labelCandidates = shapes.filter((s) => {
+    const sid = getShapeId(s.xml);
+    const sname = getShapeName(s.xml);
+    return sid === LABEL_SHAPE_ID || sname === LABEL_SHAPE_NAME;
+  });
 
-  if (nameShapeCandidates.length !== 1) {
+  if (labelCandidates.length !== 1) {
     throw new Error(
-      `Strict template mismatch: expected exactly 1 Name shape (by 'Name' + 'Subrata'), found ${nameShapeCandidates.length}.`
+      `Strict template mismatch: expected exactly 1 label placeholder shape (id=${LABEL_SHAPE_ID} or name="${LABEL_SHAPE_NAME}"), found ${labelCandidates.length}.`
     );
   }
 
-  const shape = nameShapeCandidates[0];
+  const shape = labelCandidates[0];
 
-  // If the static label already exists, do nothing.
+  // If label already exists exactly, do nothing.
   if (shape.xml.includes(`>${STATIC_LABEL_TEXT}<`)) {
     return { updatedSlide1Xml: slide1Xml, changed: false };
   }
 
   const { scopeXml, scopeOffset, paragraphs } = collectParagraphsFromShape(shape.xml);
   if (!paragraphs.length) {
-    throw new Error("Strict template mismatch: Name shape contains no paragraphs.");
+    throw new Error("Strict template mismatch: label placeholder contains no paragraphs.");
   }
 
-  const firstParaXml = paragraphs[0].xml;
+  // Prefer first paragraph.
+  const para = paragraphs[0];
+  const paraXml = para.xml;
 
-  // Reuse pPr and rPr from the first paragraph/run to preserve formatting.
-  const pPrOpen = firstParaXml.match(/<a:pPr\b[^>]*>/)?.[0] ?? "<a:pPr>";
-  const pPrClose = firstParaXml.includes("</a:pPr>") ? "</a:pPr>" : "";
-  const pPrBlock = `${pPrOpen}${pPrClose}`;
+  const runs = collectRunsFromParagraph(paraXml);
 
-  const firstRunXml = collectRunsFromParagraph(firstParaXml)[0];
-  if (!firstRunXml) {
-    throw new Error("Strict template mismatch: Name paragraph has no runs.");
+  let updatedParaXml = paraXml;
+
+  if (runs.length) {
+    // Replace first run's <a:t> if present; otherwise add <a:t> into the run.
+    const firstRun = runs[0];
+    if (/<a:t\b/.test(firstRun)) {
+      const replacedRun = firstRun.replace(
+        /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
+        `$1${escapeXmlText(STATIC_LABEL_TEXT)}$3`
+      );
+      updatedParaXml = paraXml.replace(firstRun, replacedRun);
+    } else {
+      // Run exists but has no <a:t> (rare). Insert <a:t> after rPr if present, else right after <a:r>.
+      const insertText = `<a:t>${escapeXmlText(STATIC_LABEL_TEXT)}</a:t>`;
+      const withText = firstRun.includes("</a:rPr>")
+        ? firstRun.replace("</a:rPr>", `</a:rPr>${insertText}`)
+        : firstRun.replace(/<a:r\b[^>]*>/, (m) => `${m}${insertText}`);
+      updatedParaXml = paraXml.replace(firstRun, withText);
+    }
+  } else {
+    // Paragraph has no runs: add a minimal run before endParaRPr (or before </a:p>).
+    const runXml = `<a:r><a:t>${escapeXmlText(STATIC_LABEL_TEXT)}</a:t></a:r>`;
+    if (updatedParaXml.includes("<a:endParaRPr")) {
+      updatedParaXml = updatedParaXml.replace("<a:endParaRPr", `${runXml}<a:endParaRPr`);
+    } else {
+      updatedParaXml = updatedParaXml.replace("</a:p>", `${runXml}</a:p>`);
+    }
   }
 
-  const rPrOpen = firstRunXml.match(/<a:rPr\b[^>]*>/)?.[0] ?? "<a:rPr>";
-  const rPrClose = firstRunXml.includes("</a:rPr>") ? "</a:rPr>" : "";
-  const rPrInner =
-    firstRunXml.match(/<a:rPr\b[^>]*>[\s\S]*?<\/a:rPr>/)?.[0] ?? `${rPrOpen}${rPrClose}`;
-
-  // Construct new paragraph with same formatting. Keep it minimal to avoid any layout shifts.
-  const newPara =
-    `<a:p>` +
-    `${pPrBlock}` +
-    `<a:r>` +
-    `${rPrInner}` +
-    `<a:t>${escapeXmlText(STATIC_LABEL_TEXT)}</a:t>` +
-    `</a:r>` +
-    `</a:p>`;
-
-  // Insert new paragraph at the start of the text body paragraph list.
-  const insertAt = paragraphs[0].startInScope;
+  // Apply paragraph change inside txBody scope.
   const updatedScopeXml =
-    scopeXml.slice(0, insertAt) + newPara + scopeXml.slice(insertAt);
+    scopeXml.slice(0, para.startInScope) + updatedParaXml + scopeXml.slice(para.endInScope);
 
   const updatedShapeXml =
     shape.xml.slice(0, scopeOffset) +
@@ -348,11 +359,11 @@ function addStaticLabelAboveName({ slide1Xml }) {
 /**
  * PUBLIC_INTERFACE
  * Updates ONLY the date field on slide 1 for the shipped default template,
- * while also ensuring "TATA ELXSI" exists above the Name (Slide 1).
+ * while also ensuring the label placeholder above Name reads "TATA ELXSI" (Slide 1).
  *
  * Guarantees:
  * - slide1.xml is identical except for:
- *    - the inserted static label paragraph in the Name shape (if missing), and
+ *    - the label placeholder's text runs (enforced to "TATA ELXSI"), and
  *    - the targeted date <a:t> nodes.
  * - Does not alter any <a:rPr>, paragraph properties, shape geometry, or layout.
  * - Does not change any other files; last slide stays byte-identical.
@@ -377,8 +388,8 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
 
   const slide1XmlOriginal = await slide1File.async("string");
 
-  // Step 0: ensure the static label exists above Name (in slide1.xml only).
-  const labelResult = addStaticLabelAboveName({ slide1Xml: slide1XmlOriginal });
+  // Step 0: ensure the static label is placed in the existing placeholder above Name.
+  const labelResult = setStaticLabelInExistingPlaceholder({ slide1Xml: slide1XmlOriginal });
   const slide1XmlWithLabel = labelResult.updatedSlide1Xml;
 
   // From here on, all date edits operate on slide1XmlWithLabel.
@@ -527,7 +538,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     updatedPptxBytes: out,
     detected: {
       mode: labelResult.changed
-        ? "strict-template/add-static-label+date-only-node-guard"
+        ? "strict-template/set-existing-label-placeholder+date-only-node-guard"
         : "strict-template/date-only-node-guard",
       slidePath: SLIDE1_PATH,
       shapeName,
