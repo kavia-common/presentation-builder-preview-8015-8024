@@ -5,14 +5,20 @@ import React, { useEffect, useMemo, useState } from "react";
  * PptxPreview provides a robust client-side preview surface for a PPTX blob URL.
  *
  * Rationale:
- * - Most browsers cannot natively render PPTX content in an iframe/object, resulting
- *   in a blank area and a "no preview slides shown" user experience.
+ * - Most browsers cannot natively render PPTX content in an iframe/object.
  * - We still try to embed for the browsers/environments that support it.
  * - We ALWAYS provide a user-visible fallback: a direct link that opens/downloads the PPTX.
+ * - If any step fails, we show a clear error message instead of a blank state.
  *
  * This component does not parse or modify the PPTX. It only displays the already-generated blob URL.
  */
-export default function PptxPreview({ url, filename, debug = false }) {
+export default function PptxPreview({
+  url,
+  filename,
+  debug = false,
+  errorMessage = "",
+  pipeline = null,
+}) {
   const [hasLoadEvent, setHasLoadEvent] = useState(false);
   const [embedError, setEmbedError] = useState("");
 
@@ -23,19 +29,41 @@ export default function PptxPreview({ url, filename, debug = false }) {
 
   const label = useMemo(() => filename || "Generated.pptx", [filename]);
 
-  // Always provide a user-visible surface (never a blank card).
-  // If url is empty, show an explanatory placeholder. If url exists, ALWAYS show the link.
+  // Never render a blank surface:
+  // - When URL exists: ALWAYS show the Open/Download link.
+  // - When URL missing: show either an error (if provided) or a waiting message.
+  const showError = Boolean(!url && errorMessage);
+
   if (!url) {
     return (
       <div className="pptx-preview">
         <div className="preview-toolbar" aria-label="Preview actions">
           <div className="hint">
-            Preview will appear here once the template is loaded and the PPTX is generated.
+            {showError
+              ? "Preview could not be generated."
+              : "Preview will appear here once the template is loaded and the PPTX is generated."}
           </div>
+          {debug && pipeline ? (
+            <div className="hint">
+              Debug: <strong>{pipeline.step}</strong>
+              {pipeline.detail ? (
+                <>
+                  {" "}
+                  (<code>{pipeline.detail}</code>)
+                </>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
-        <div className="empty-preview">
-          Waiting for generation output…
+        <div className="empty-preview" role={showError ? "alert" : undefined}>
+          {showError ? (
+            <>
+              <strong>Error:</strong> {errorMessage}
+            </>
+          ) : (
+            "Waiting for generation output…"
+          )}
         </div>
       </div>
     );
@@ -47,9 +75,10 @@ export default function PptxPreview({ url, filename, debug = false }) {
         <a className="btn btn-secondary" href={url} download={label}>
           Download / Open PPTX
         </a>
+
         <div className="hint">
-          Most browsers can’t render PPTX inline. If slides are not visible below, use “Download /
-          Open PPTX”.
+          Most browsers can’t render PPTX inline. If slides are not visible below,
+          use “Download / Open PPTX”.
           {debug ? (
             <>
               {" "}
@@ -59,6 +88,12 @@ export default function PptxPreview({ url, filename, debug = false }) {
                   <>
                     {", error: "}
                     <strong>{embedError}</strong>
+                  </>
+                ) : null}
+                {pipeline ? (
+                  <>
+                    {", pipeline: "}
+                    <strong>{pipeline.step}</strong>
                   </>
                 ) : null}
                 )
@@ -87,8 +122,8 @@ export default function PptxPreview({ url, filename, debug = false }) {
           onError={() => setEmbedError("object error")}
         >
           <div className="empty-preview">
-            Inline PPTX preview is not supported in this browser. Use the link above to open the
-            generated file.
+            Inline PPTX preview is not supported in this browser. Use the link
+            above to open the generated file.
           </div>
         </object>
       </div>

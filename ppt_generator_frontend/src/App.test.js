@@ -40,7 +40,7 @@ async function makeMinimalPptxArrayBuffer() {
 }
 
 describe("PPTX preview regeneration", () => {
-  test("changing the date regenerates the blob URL and refreshes the preview iframe src", async () => {
+  test("changing the date regenerates the blob URL and keeps a visible Open/Download link", async () => {
     global.fetch = jest.fn(async () => ({
       ok: true,
       arrayBuffer: async () => await makeMinimalPptxArrayBuffer(),
@@ -48,18 +48,22 @@ describe("PPTX preview regeneration", () => {
 
     render(<App />);
 
-    const iframe = await screen.findByTitle("PPTX Preview");
-    const firstSrc = iframe.getAttribute("src");
-    expect(firstSrc).toBeTruthy();
+    // The UI always provides a non-blank preview surface.
+    // Once the PPTX is generated, it must show the Download/Open link (reliable fallback).
+    const firstLink = await screen.findByRole("link", {
+      name: "Download / Open PPTX",
+    });
+    const firstHref = firstLink.getAttribute("href");
+    expect(firstHref).toBeTruthy();
 
     const dateInput = screen.getByLabelText("Slide 1 Date");
     fireEvent.change(dateInput, { target: { value: "2026-01-06" } });
 
     await waitFor(() => {
-      const updated = screen.getByTitle("PPTX Preview");
-      const nextSrc = updated.getAttribute("src");
-      expect(nextSrc).toBeTruthy();
-      expect(nextSrc).not.toEqual(firstSrc);
+      const nextLink = screen.getByRole("link", { name: "Download / Open PPTX" });
+      const nextHref = nextLink.getAttribute("href");
+      expect(nextHref).toBeTruthy();
+      expect(nextHref).not.toEqual(firstHref);
     });
   });
 

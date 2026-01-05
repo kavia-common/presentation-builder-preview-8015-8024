@@ -31,13 +31,24 @@ const SLIDE1_PATH = "ppt/slides/slide1.xml";
  * @returns {Promise<ArrayBuffer>} PPTX bytes
  */
 export async function fetchBundledTemplatePptx() {
-  const res = await fetch("/assets/template.pptx");
+  const res = await fetch("/assets/template.pptx", { cache: "no-store" });
   if (!res.ok) {
     throw new Error(
       `Failed to fetch bundled template from /assets/template.pptx (HTTP ${res.status}).`
     );
   }
-  return await res.arrayBuffer();
+
+  const buf = await res.arrayBuffer();
+
+  // Lightweight validity check: PPTX is a ZIP => first 2 bytes should be 'PK'.
+  const header = new Uint8Array(buf.slice(0, 2));
+  if (!(header[0] === 0x50 && header[1] === 0x4b)) {
+    throw new Error(
+      "Bundled template does not appear to be a valid PPTX (ZIP header missing). Check /public/assets/template.pptx."
+    );
+  }
+
+  return buf;
 }
 
 function pad2(n) {

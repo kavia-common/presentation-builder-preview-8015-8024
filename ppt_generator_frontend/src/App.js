@@ -9,6 +9,23 @@ import {
   updatePptxDateOnly,
 } from "./pptx/templateEditor";
 
+/**
+ * Returns true when UI debug logging is enabled.
+ * Gated by REACT_APP_LOG_LEVEL=debug to avoid noisy logs in normal usage.
+ */
+function isDebugEnabled() {
+  return String(process.env.REACT_APP_LOG_LEVEL || "").toLowerCase() === "debug";
+}
+
+/**
+ * Debug logger helper (no-op unless debug is enabled).
+ */
+function debugLog(...args) {
+  if (!isDebugEnabled()) return;
+  // eslint-disable-next-line no-console
+  console.log("[pptx-preview]", ...args);
+}
+
 // PUBLIC_INTERFACE
 function App() {
   const [theme, setTheme] = useState("light");
@@ -19,14 +36,39 @@ function App() {
 
   const [generatedBytes, setGeneratedBytes] = useState(null); // Uint8Array
   const [previewUrl, setPreviewUrl] = useState("");
+  const previousPreviewUrlRef = useRef("");
   const [previewKey, setPreviewKey] = useState(0);
   const [status, setStatus] = useState({ kind: "idle", message: "" });
   const [detectionInfo, setDetectionInfo] = useState(null);
+
+  // Pipeline step visibility (to avoid blank preview and aid debugging)
+  const [pipeline, setPipeline] = useState({
+    step: "init", // init | fetch:loading | fetch:ok | fetch:error | edit:loading | edit:ok | edit:error | blob:ok
+    detail: "",
+  });
 
   // Apply theme to document
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  // Revoke the previous blob URL only after the new URL is committed.
+  // This prevents a class of "blank preview" issues where a URL gets revoked too early
+  // while the iframe is still loading or before React commits the new src.
+  useEffect(() => {
+    const prev = previousPreviewUrlRef.current;
+    if (prev && prev !== previewUrl) {
+      window.setTimeout(() => {
+        try {
+          URL.revokeObjectURL(prev);
+          debugLog("revokeObjectURL(prev) ok");
+        } catch (e) {
+          debugLog("revokeObjectURL(prev) failed", e);
+        }
+      }, 0);
+    }
+    previousPreviewUrlRef.current = previewUrl;
+  }, [previewUrl]);
 
   // Load bundled template (Default Template mode)
   useEffect(() => {
@@ -34,13 +76,28 @@ function App() {
 
     async function loadBundled() {
       try {
+        setPipeline({ step: "fetch:loading", detail: "/assets/template.pptx" });
         setStatus({ kind: "loading", message: "Loading Default Template…" });
+        debugLog("fetch start", "/assets/template.pptx");
+
         const bytes = await fetchBundledTemplatePptx();
         if (cancelled) return;
+
+        debugLog("fetch ok", { byteLength: bytes?.byteLength });
+        setPipeline({
+          step: "fetch:ok",
+          detail: `${bytes?.byteLength ?? 0} bytes`,
+        });
+
         setTemplateBytes(bytes);
         setStatus({ kind: "ready", message: "Default Template loaded." });
       } catch (e) {
         if (cancelled) return;
+        debugLog("fetch error", e);
+        setPipeline({
+          step: "fetch:error",
+          detail: e instanceof Error ? e.message : String(e),
+        });
         setStatus({
           kind: "error",
           message:
@@ -70,7 +127,12 @@ function App() {
     const timeoutId = window.setTimeout(() => {
       async function regenerate() {
         try {
-          setStatus({ kind: "loading", message: "Generating preview (date only)…" });
+          setPipeline({ step: "edit:loading", detail: `date=${dateISO}` });
+          setStatus({
+            kind: "loading",
+            message: "Generating preview (date only)…",
+          });
+          debugLog("edit start", { dateISO, templateBytes: templateBytes.byteLength });
 
           const { updatedPptxBytes, detected } = await updatePptxDateOnly(
             templateBytes,
@@ -80,32 +142,40 @@ function App() {
           // Ignore out-of-date results (date changed again while we were generating).
           if (cancelled || regenSeqRef.current !== seq) return;
 
+          debugLog("edit ok", {
+            updatedBytes: updatedPptxBytes?.byteLength ?? updatedPptxBytes?.length,
+            detected,
+          });
+          setPipeline({
+            step: "edit:ok",
+            detail: `${updatedPptxBytes?.byteLength ?? updatedPptxBytes?.length ?? 0} bytes`,
+          });
+
           setGeneratedBytes(updatedPptxBytes);
           setDetectionInfo(detected);
 
-          // Refresh preview URL:
-          // - Create a new blob URL every time, so the iframe has a new resource to load.
-          // - Revoke the previous URL *after* React commits the new src to avoid revoking
-          //   too early (some browsers can behave oddly if the old blob is revoked immediately).
           const nextUrl = createPptxObjectUrl(updatedPptxBytes);
-          setPreviewUrl((prev) => {
-            if (prev) {
-              window.setTimeout(() => URL.revokeObjectURL(prev), 0);
-            }
-            return nextUrl;
-          });
+          debugLog("blob url created", nextUrl);
+
+          setPipeline({ step: "blob:ok", detail: nextUrl });
+
+          // Force reload of embed surfaces with a new URL + key.
+          setPreviewUrl(nextUrl);
           setPreviewKey((k) => k + 1);
 
           setStatus({ kind: "ready", message: "Preview updated." });
         } catch (e) {
           if (cancelled || regenSeqRef.current !== seq) return;
 
+          debugLog("edit error", e);
+          setPipeline({
+            step: "edit:error",
+            detail: e instanceof Error ? e.message : String(e),
+          });
+
           setGeneratedBytes(null);
           setDetectionInfo(null);
-          setPreviewUrl((prev) => {
-            if (prev) window.setTimeout(() => URL.revokeObjectURL(prev), 0);
-            return "";
-          });
+          setPreviewUrl("");
 
           setStatus({
             kind: "error",
@@ -128,7 +198,23 @@ function App() {
 
   useEffect(() => {
     return () => {
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      // Cleanup current URL on unmount.
+      if (previewUrl) {
+        try {
+          URL.revokeObjectURL(previewUrl);
+        } catch (e) {
+          // ignore
+        }
+      }
+      // Also cleanup any previous url we may still hold.
+      const prev = previousPreviewUrlRef.current;
+      if (prev && prev !== previewUrl) {
+        try {
+          URL.revokeObjectURL(prev);
+        } catch (e) {
+          // ignore
+        }
+      }
     };
   }, [previewUrl]);
 
@@ -148,7 +234,8 @@ function App() {
             <div className="brand-text">
               <div className="brand-title">Default Template (Date Only)</div>
               <div className="brand-subtitle">
-                Only Slide 1 date is editable • all other content locked • last slide preserved exactly
+                Only Slide 1 date is editable • all other content locked • last
+                slide preserved exactly
               </div>
             </div>
           </div>
@@ -185,9 +272,9 @@ function App() {
                   onChange={(e) => setDateISO(e.target.value)}
                 />
                 <div className="hint">
-                  Updates only the exact date text runs on slide 1 (preserving font,
-                  size, color, spacing, and locale format). All other slides/files,
-                  including the last slide, are left untouched.
+                  Updates only the exact date text runs on slide 1 (preserving
+                  font, size, color, spacing, and locale format). All other
+                  slides/files, including the last slide, are left untouched.
                 </div>
               </div>
             </div>
@@ -207,6 +294,22 @@ function App() {
               <span className="status-text">{status.message}</span>
             </div>
 
+            {isDebugEnabled() ? (
+              <div className="field-row">
+                <div className="field">
+                  <div className="hint">
+                    Debug pipeline: <strong>{pipeline.step}</strong>
+                    {pipeline.detail ? (
+                      <>
+                        {" "}
+                        (<code>{pipeline.detail}</code>)
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
             <div className="actions">
               <button
                 className="btn btn-primary"
@@ -224,10 +327,12 @@ function App() {
               <div className="meta">
                 {detectionInfo ? (
                   <div className="hint">
-                    Placeholder detection:{" "}
-                    <strong>{detectionInfo.mode}</strong>
+                    Placeholder detection: <strong>{detectionInfo.mode}</strong>
                     {detectionInfo.mode === "token" ? (
-                      <> (token: <code>{detectionInfo.token}</code>)</>
+                      <>
+                        {" "}
+                        (token: <code>{detectionInfo.token}</code>)
+                      </>
                     ) : null}
                   </div>
                 ) : (
@@ -244,16 +349,29 @@ function App() {
             <div className="card-header">
               <h2>Preview</h2>
               <p>
-                Most browsers don’t natively render PPTX inline. We attempt an embedded preview,
-                and always provide a “Download / Open” fallback so you never get a blank preview.
+                Most browsers don’t natively render PPTX inline. We attempt an
+                embedded preview, and always provide a “Download / Open” fallback
+                so you never get a blank preview.
               </p>
             </div>
 
             <PptxPreview
               key={previewKey}
               url={previewUrl}
-              filename={generatedBytes ? `Updated_Template_${dateISO}.pptx` : "Updated_Template.pptx"}
-              debug={String(process.env.REACT_APP_LOG_LEVEL || "").toLowerCase() === "debug"}
+              filename={
+                generatedBytes
+                  ? `Updated_Template_${dateISO}.pptx`
+                  : "Updated_Template.pptx"
+              }
+              debug={isDebugEnabled()}
+              errorMessage={
+                status.kind === "error" && status.message ? status.message : ""
+              }
+              pipeline={
+                isDebugEnabled()
+                  ? { step: pipeline.step, detail: pipeline.detail }
+                  : null
+              }
             />
           </section>
         </main>
@@ -261,8 +379,8 @@ function App() {
         <footer className="ocean-footer">
           <div className="footer-note">
             Locking behavior: The app edits only the Slide 1 date text runs inside{" "}
-            <code>ppt/slides/slide1.xml</code>. All other files in the PPTX zip are
-            left unchanged, so the last slide remains byte-for-byte identical.
+            <code>ppt/slides/slide1.xml</code>. All other files in the PPTX zip
+            are left unchanged, so the last slide remains byte-for-byte identical.
           </div>
         </footer>
       </header>
