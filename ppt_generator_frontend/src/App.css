@@ -383,6 +383,35 @@
   color: var(--ocean-muted);
 }
 
+.skill-factory-controls {
+  display: grid;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+  margin-top: 6px;
+}
+
+.skill-factory-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+[data-theme="dark"] .skill-factory-select {
+  background: rgba(17, 24, 39, 0.25);
+}
+
+.skill-factory-select:focus {
+  border-color: rgba(37, 99, 235, 0.65);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
 .preview-grid {
   grid-template-columns: 0.92fr 1.08fr;
   grid-template-rows: 1fr;

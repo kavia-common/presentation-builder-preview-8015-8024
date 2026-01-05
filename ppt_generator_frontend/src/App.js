@@ -8,6 +8,10 @@ import {
   todayIsoDate,
   updatePptxDateOnly,
 } from "./pptx/templateEditor";
+import {
+  addSkillFactoryToPptx,
+  getSkillFactoryScaffold,
+} from "./pptx/skillFactory";
 
 /**
  * Returns true when UI debug logging is enabled.
@@ -41,9 +45,15 @@ function App() {
   const [status, setStatus] = useState({ kind: "idle", message: "" });
   const [detectionInfo, setDetectionInfo] = useState(null);
 
-  // Controls future behavior for adding the remaining slides.
-  // For this subtask it's a visible option only; date-only editing + last-slide invariants remain enforced.
+  // Controls future behavior for adding remaining slides.
+  // For this subtask:
+  // - dateOnly: only slide 1 date editing is applied.
+  // - skillFactory: user may append a Skill Factory (4 slides) before the last slide.
   const [addMode, setAddMode] = useState("dateOnly"); // dateOnly | skillFactory
+
+  // Skill Factory state
+  const [skillFactories, setSkillFactories] = useState([]); // [{ kind, label }]
+  const [selectedFactoryKind, setSelectedFactoryKind] = useState("java"); // java | dataEngineering
 
   // Pipeline step visibility (to avoid blank preview and aid debugging)
   const [pipeline, setPipeline] = useState({
@@ -138,27 +148,46 @@ function App() {
           });
           debugLog("edit start", { dateISO, templateBytes: templateBytes.byteLength });
 
-          const { updatedPptxBytes, detected } = await updatePptxDateOnly(
-            templateBytes,
-            dateISO
-          );
+          const { updatedPptxBytes: dateOnlyBytes, detected } =
+            await updatePptxDateOnly(templateBytes, dateISO);
+
+          let finalBytes = dateOnlyBytes;
+
+          // Optional: append Skill Factory slides (4 per factory), inserted before last slide.
+          // IMPORTANT: This must NOT modify the template's last slide bytes.
+          if (addMode === "skillFactory" && skillFactories.length) {
+            setPipeline({
+              step: "edit:loading",
+              detail: `date=${dateISO}, skillFactories=${skillFactories.length}`,
+            });
+
+            // Apply factories in sequence to ensure ordering is stable.
+            // eslint-disable-next-line no-restricted-syntax
+            for (const f of skillFactories) {
+              // eslint-disable-next-line no-await-in-loop
+              const res = await addSkillFactoryToPptx(finalBytes, f);
+              finalBytes = res.updatedPptxBytes;
+            }
+          }
 
           // Ignore out-of-date results (date changed again while we were generating).
           if (cancelled || regenSeqRef.current !== seq) return;
 
           debugLog("edit ok", {
-            updatedBytes: updatedPptxBytes?.byteLength ?? updatedPptxBytes?.length,
+            updatedBytes: finalBytes?.byteLength ?? finalBytes?.length,
             detected,
+            addMode,
+            skillFactories,
           });
           setPipeline({
             step: "edit:ok",
-            detail: `${updatedPptxBytes?.byteLength ?? updatedPptxBytes?.length ?? 0} bytes`,
+            detail: `${finalBytes?.byteLength ?? finalBytes?.length ?? 0} bytes`,
           });
 
-          setGeneratedBytes(updatedPptxBytes);
+          setGeneratedBytes(finalBytes);
           setDetectionInfo(detected);
 
-          const nextUrl = createPptxObjectUrl(updatedPptxBytes);
+          const nextUrl = createPptxObjectUrl(finalBytes);
           debugLog("blob url created", nextUrl);
 
           setPipeline({ step: "blob:ok", detail: nextUrl });
@@ -198,7 +227,7 @@ function App() {
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [templateBytes, dateISO]);
+  }, [templateBytes, dateISO, addMode, skillFactories]);
 
   useEffect(() => {
     return () => {
@@ -379,6 +408,21 @@ function App() {
                   ? { step: pipeline.step, detail: pipeline.detail }
                   : null
               }
+              skillFactoryUI={{
+                enabled: addMode === "skillFactory",
+                selectedKind: selectedFactoryKind,
+                onChangeKind: setSelectedFactoryKind,
+                onAddFactory: () => {
+                  const scaffold = getSkillFactoryScaffold(selectedFactoryKind);
+                  // Add only the factory descriptor; slide insertion happens in regeneration.
+                  setSkillFactories((prev) => {
+                    // Avoid duplicates of same kind for now.
+                    if (prev.some((x) => x.kind === scaffold.kind)) return prev;
+                    return [...prev, { kind: scaffold.kind, label: scaffold.label }];
+                  });
+                },
+                addedFactories: skillFactories,
+              }}
             />
           </section>
         </main>

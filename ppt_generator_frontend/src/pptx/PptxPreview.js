@@ -24,6 +24,7 @@ export default function PptxPreview({
   pipeline = null,
   onSelectAddMode = null,
   addMode = "dateOnly",
+  skillFactoryUI = null,
 }) {
   const [slideIndexes, setSlideIndexes] = useState([]);
   const [currentIdx, setCurrentIdx] = useState(0); // index into slideIndexes[]
@@ -204,6 +205,51 @@ export default function PptxPreview({
               />
               Skill Factory
             </label>
+
+            {skillFactoryUI?.enabled ? (
+              <div className="skill-factory-controls" aria-label="Add Skill Factory">
+                <div className="add-mode-label">Add Skill Factory</div>
+
+                <label className="field" style={{ minWidth: "220px" }}>
+                  <span className="hint" style={{ display: "block", marginBottom: 6 }}>
+                    Factory
+                  </span>
+                  <select
+                    className="skill-factory-select"
+                    value={skillFactoryUI.selectedKind || "java"}
+                    onChange={(e) =>
+                      skillFactoryUI.onChangeKind &&
+                      skillFactoryUI.onChangeKind(e.target.value)
+                    }
+                  >
+                    <option value="java">Java</option>
+                    <option value="dataEngineering">Data Engineering</option>
+                  </select>
+                </label>
+
+                <button
+                  className="btn btn-primary"
+                  type="button"
+                  onClick={() => skillFactoryUI.onAddFactory && skillFactoryUI.onAddFactory()}
+                >
+                  Add Factory (4 slides)
+                </button>
+
+                {skillFactoryUI.addedFactories?.length ? (
+                  <div className="hint" style={{ marginTop: 8 }}>
+                    Added:{" "}
+                    <strong>
+                      {skillFactoryUI.addedFactories.map((f) => f.label).join(", ")}
+                    </strong>
+                  </div>
+                ) : (
+                  <div className="hint" style={{ marginTop: 8 }}>
+                    Adds 4 slides per factory after the existing slides, before the last slide.
+                    (Only the first factory slide is fully implemented in this iteration.)
+                  </div>
+                )}
+              </div>
+            ) : null}
           </div>
         </div>
 
