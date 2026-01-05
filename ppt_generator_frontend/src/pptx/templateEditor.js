@@ -283,8 +283,9 @@ function verifyOnlyAllowedSlide1DiffsByATextNodes({
  * - This MUST preserve styling + precise placement from the PPT template (per latest image).
  *   Therefore we ONLY replace text inside an existing <a:t> node of the existing shape.
  * - We do NOT add paragraphs, do NOT add new runs, and do NOT change geometry.
- * - If the placeholder has no existing <a:t>, we fail fast (strict template expectation),
- *   because inserting nodes could alter layout/line breaks and risk overlap.
+ * - If the placeholder has no existing <a:t>, we insert exactly ONE styled run
+ *   (user-approved) into the existing first paragraph, without adding paragraphs
+ *   and without changing any geometry.
  */
 function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
   const shapes = collectShapeBlocks(slide1Xml);
@@ -313,33 +314,74 @@ function setStaticLabelInExistingPlaceholder({ slide1Xml }) {
     throw new Error("Strict template mismatch: label placeholder contains no paragraphs.");
   }
 
-  // Use the first paragraph only; we must not introduce extra lines.
+  // Use the first paragraph only; we must not introduce extra lines (no new <a:p>).
   const para = paragraphs[0];
   const paraXml = para.xml;
 
-  // STRICT: require an existing <a:t> node so we can preserve run styling + layout.
   const runs = collectRunsFromParagraph(paraXml);
   const runIndexWithText = runs.findIndex((r) => /<a:t\b/.test(r));
 
-  if (runIndexWithText < 0) {
+  // Path A: Preferred — replace text in an existing <a:t> to preserve styling/layout.
+  if (runIndexWithText >= 0) {
+    const targetRun = runs[runIndexWithText];
+
+    const replacedRun = targetRun.replace(
+      /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
+      `$1${escapeXmlText(STATIC_LABEL_TEXT)}$3`
+    );
+
+    const updatedParaXml = paraXml.replace(targetRun, replacedRun);
+
+    const updatedScopeXml =
+      scopeXml.slice(0, para.startInScope) +
+      updatedParaXml +
+      scopeXml.slice(para.endInScope);
+
+    const updatedShapeXml =
+      shape.xml.slice(0, scopeOffset) +
+      updatedScopeXml +
+      shape.xml.slice(scopeOffset + scopeXml.length);
+
+    const updatedSlide1Xml =
+      slide1Xml.slice(0, shape.start) + updatedShapeXml + slide1Xml.slice(shape.end);
+
+    return { updatedSlide1Xml, changed: true };
+  }
+
+  /**
+   * Path B: User-approved exception — the label placeholder has no <a:t> runs.
+   * We must insert EXACTLY ONE styled run into the existing first paragraph:
+   * - Do NOT add paragraphs.
+   * - Do NOT add multiple runs.
+   * - Preserve styling context by cloning the first existing <a:r> (with <a:rPr>)
+   *   and replacing its content with a single <a:t>TATA ELXSI</a:t>.
+   *
+   * This keeps geometry untouched (no <a:xfrm> changes) and minimizes layout risk.
+   */
+  const anyRunIndex = runs.findIndex((r) => /<a:r\b/.test(r));
+  if (anyRunIndex < 0) {
     throw new Error(
-      "Strict template mismatch: label placeholder contains no <a:t> text runs; refusing to insert new runs to avoid layout/overlap changes."
+      "Strict template mismatch: label placeholder paragraph contains no <a:r> runs to clone for styling."
     );
   }
 
-  const targetRun = runs[runIndexWithText];
+  const styleSeedRun = runs[anyRunIndex];
 
-  // Replace only the inner text of the FIRST <a:t> in the first text-bearing run.
-  // This preserves all styling (<a:rPr>), spacing, and shape geometry so placement
-  // remains exactly as in the template (and matches the latest screenshot).
-  const replacedRun = targetRun.replace(
-    /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
-    `$1${escapeXmlText(STATIC_LABEL_TEXT)}$3`
-  );
+  // Extract <a:rPr ...>...</a:rPr> if present to preserve styling.
+  const rPrXml = styleSeedRun.match(/<a:rPr\b[\s\S]*?<\/a:rPr>/)?.[0] ?? "";
 
-  const updatedParaXml = paraXml.replace(targetRun, replacedRun);
+  // Construct exactly one run with exactly one <a:t>.
+  const insertedRun = `<a:r>${rPrXml}<a:t>${escapeXmlText(STATIC_LABEL_TEXT)}</a:t></a:r>`;
 
-  // Apply paragraph change inside txBody scope.
+  // Insert the run into the existing paragraph WITHOUT creating new paragraphs.
+  // We insert it just before </a:p> so we don't disturb existing leading nodes (e.g., <a:pPr>).
+  const updatedParaXml = paraXml.replace(/<\/a:p>$/, `${insertedRun}</a:p>`);
+  if (updatedParaXml === paraXml) {
+    throw new Error(
+      "Strict template mismatch: failed to insert the single label run (could not locate </a:p>)."
+    );
+  }
+
   const updatedScopeXml =
     scopeXml.slice(0, para.startInScope) +
     updatedParaXml +
