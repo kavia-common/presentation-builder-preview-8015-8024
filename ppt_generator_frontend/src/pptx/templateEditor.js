@@ -2,23 +2,25 @@ import JSZip from "jszip";
 import { saveAs } from "file-saver";
 
 /**
- * NOTE ABOUT THE TEMPLATE:
- * - Place the bundled template at: `public/assets/template.pptx`
- * - This app also allows uploading a PPTX, but the template must have either:
- *   (A) a well-documented placeholder token like {{DATE}} in slide 1, OR
- *   (B) a "Date:" label followed by date fragments (as in the provided PPTX).
+ * STRICT TEMPLATE RULES (user requirements):
+ * - The app ships with a built-in PPTX: `public/assets/template.pptx`.
+ * - The last slide must be preserved exactly: we therefore do not modify any files
+ *   except `ppt/slides/slide1.xml`, and inside that file we only mutate the exact
+ *   date text nodes (no reformatting, no reflow, no styling changes).
+ * - On slide 1, ONLY the date field is editable, and its visible formatting (font,
+ *   size, color, spacing, position, and locale/format) must remain exactly as in
+ *   the original file.
  *
- * This implementation uses a robust fallback:
- * - If "{{DATE}}" exists anywhere in slide1.xml, replace that token only.
- * - Otherwise, locate the paragraph that contains a run with "Date" and then
- *   rewrite only the subsequent runs that currently form the date value.
- *
- * By editing ONLY `ppt/slides/slide1.xml` and leaving all other zip entries
- * untouched, we keep the last slide unchanged.
+ * Implementation approach:
+ * - We load `ppt/slides/slide1.xml` and find the paragraph containing the "Date"
+ *   label run, then locate the exact sequence of date runs:
+ *     ["\u00a0 24\u00a0", "Dec", " ", "202", "5"]
+ * - We replace text INSIDE those existing <a:t> nodes only, keeping the number of
+ *   runs and their <a:rPr> styling identical.
+ * - We intentionally do not support uploads or generic templates in this strict mode.
  */
 
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
-const PLACEHOLDER_TOKEN = "{{DATE}}";
 
 /**
  * PUBLIC_INTERFACE
@@ -35,31 +37,18 @@ export async function fetchBundledTemplatePptx() {
   return await res.arrayBuffer();
 }
 
-/**
- * PUBLIC_INTERFACE
- * Reads a user-selected file into ArrayBuffer.
- * @param {File} file
- * @returns {Promise<ArrayBuffer>}
- */
-export function readFileAsArrayBuffer(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Failed to read file."));
-    reader.onload = () => resolve(reader.result);
-    reader.readAsArrayBuffer(file);
-  });
-}
-
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
+/**
+ * The template’s visible date format is: "24 Dec 2025" (en-GB short month).
+ * We must keep that exact locale/format.
+ */
 function formatDateForTemplate(dateInput) {
-  // Template’s visible format is like: "24 Dec 2025"
-  // We render day without leading zero.
   const d = new Date(dateInput);
   if (Number.isNaN(d.getTime())) return "";
-  const day = d.getDate();
+  const day = d.getDate(); // no leading zero
   const month = d.toLocaleString("en-GB", { month: "short" });
   const year = d.getFullYear();
   return `${day} ${month} ${year}`;
@@ -75,8 +64,8 @@ function escapeXmlText(text) {
 }
 
 /**
- * Finds the <a:p> paragraph range (start,end) that contains "Date" label.
- * This is designed to match the provided PPTX where "Date" is a run in a single paragraph.
+ * Finds the <a:p> paragraph range (start,end) that contains the run "Date".
+ * This matches the shipped template.
  */
 function findDateParagraphBounds(slide1Xml) {
   const idx = slide1Xml.indexOf("Date</a:t>");
@@ -90,91 +79,126 @@ function findDateParagraphBounds(slide1Xml) {
 }
 
 /**
- * Updates date in a paragraph by replacing the sequence of <a:t> runs that represent the date value.
+ * Updates ONLY the exact date runs in the paragraph:
+ *   "\u00a0 24\u00a0", "Dec", " ", "202", "5"
+ * by replacing the text content inside those existing <a:t> nodes.
  *
- * Strategy for the provided template (observed pattern):
- *   runs: [" ", ":", "\u00a0 24\u00a0", "Dec", " ", "202", "5"]
- * We keep the "Date : " label runs intact and only replace the following date runs with:
- *   runs: ["\u00a0 {day}\u00a0", "Mon", " ", "YYYY"]
- * with year potentially split; we will place full year in a single run to keep it simple.
+ * This preserves:
+ * - number of runs
+ * - run properties (<a:rPr>)
+ * - spacing and position behavior
  *
- * NOTE:
- * This does not modify other shapes/textboxes, only this paragraph’s date runs.
+ * @param {string} paragraphXml - the full <a:p>...</a:p> block
+ * @param {string} formattedDate - e.g. "24 Dec 2025"
  */
-function updateDateRunsInParagraph(paragraphXml, formattedDate) {
-  // Prefer explicit placeholder if present.
-  if (paragraphXml.includes(PLACEHOLDER_TOKEN)) {
-    return paragraphXml.replaceAll(PLACEHOLDER_TOKEN, escapeXmlText(formattedDate));
-  }
-
-  // Extract runs: capture entire <a:r ...>...</a:r> blocks so we can preserve styling.
-  const runRegex = /<a:r>([\s\S]*?)<\/a:r>/g;
+function updateExactTemplateDateRuns(paragraphXml, formattedDate) {
+  // Collect all <a:r> blocks and their first <a:t> contents.
+  const runRegex = /<a:r\b[^>]*>[\s\S]*?<\/a:r>/g;
   const runs = [];
-  let match;
-  while ((match = runRegex.exec(paragraphXml)) !== null) {
-    runs.push({ full: match[0], inner: match[1], start: match.index, end: runRegex.lastIndex });
+  let m;
+  while ((m = runRegex.exec(paragraphXml)) !== null) {
+    const full = m[0];
+    const tMatch = full.match(/<a:t[^>]*>([\s\S]*?)<\/a:t>/);
+    // Not all runs have <a:t>, but in this paragraph they do; still be defensive.
+    runs.push({
+      full,
+      tText: tMatch ? tMatch[1] : null,
+      hasText: !!tMatch,
+    });
   }
 
-  // Find the run index containing <a:t>Date</a:t>
-  const dateLabelIdx = runs.findIndex((r) => /<a:t>\s*Date\s*<\/a:t>/.test(r.full));
+  // We expect a specific sequence in the shipped template:
+  // ["Date", " ", ":", "\u00a0 24\u00a0", "Dec", " ", "202", "5"]
+  const dateLabelIdx = runs.findIndex(
+    (r) => r.hasText && r.tText === "Date"
+  );
   if (dateLabelIdx < 0) {
-    // As a fallback, if we cannot reliably find label in runs, do not mutate.
-    return paragraphXml;
+    throw new Error('Strict template mismatch: could not find "Date" run.');
   }
 
-  // After "Date", there are typically runs for space, ":" etc. We want to start replacement
-  // at the first run after ":" (or after "Date" if ":" not present).
-  let replaceFrom = dateLabelIdx + 1;
-  const colonIdx = runs.findIndex((r, i) => i > dateLabelIdx && /<a:t>\s*:\s*<\/a:t>/.test(r.full));
-  if (colonIdx >= 0) replaceFrom = colonIdx + 1;
+  // Validate the subsequent run texts so we only ever touch the intended field.
+  const expected = [
+    " ",
+    ":",
+    "\u00a0 24\u00a0",
+    "Dec",
+    " ",
+    "202",
+    "5",
+  ];
+  const actual = runs
+    .slice(dateLabelIdx + 1, dateLabelIdx + 1 + expected.length)
+    .map((r) => (r.hasText ? r.tText : null));
 
-  // Replace until end of paragraph runs (but keep the paragraph structure).
-  // Create new runs using the first date-value run’s <a:rPr> (style) if available.
-  const styleSourceRun = runs[replaceFrom] || runs[colonIdx] || runs[dateLabelIdx];
-  const rPrMatch = styleSourceRun.full.match(/<a:rPr[\s\S]*?<\/a:rPr>/);
-  const rPr = rPrMatch ? rPrMatch[0] : null;
+  const matchesExpected =
+    actual.length === expected.length &&
+    actual.every((v, i) => v === expected[i]);
+
+  if (!matchesExpected) {
+    throw new Error(
+      "Strict template mismatch: date field runs are not in the expected shape; refusing to modify."
+    );
+  }
 
   const [day, mon, year] = formattedDate.split(" ");
-  const newTexts = [
-    // Keep non-breaking spaces around day to match template spacing.
-    `\u00a0 ${day}\u00a0`,
+  const y = String(year);
+  const yHead = y.slice(0, 3);
+  const yTail = y.slice(3);
+
+  // Replace ONLY the <a:t> contents for the 5 date value runs, preserving the run blocks.
+  const replacements = [
+    `\u00a0 ${day}\u00a0`, // keep NBSP and spacing pattern exactly
     mon,
     " ",
-    year,
+    yHead,
+    yTail,
+  ].map(escapeXmlText);
+
+  const replaceRunIndexes = [
+    dateLabelIdx + 3, // "\u00a0 24\u00a0"
+    dateLabelIdx + 4, // "Dec"
+    dateLabelIdx + 5, // " "
+    dateLabelIdx + 6, // "202"
+    dateLabelIdx + 7, // "5"
   ];
 
-  const newRunBlocks = newTexts.map((t) => {
-    const safeText = escapeXmlText(t);
-    const rPrXml = rPr ? rPr : "";
-    // If we include rPr, ensure we keep it inside <a:r> in the same order as typical PPTX: rPr then t.
-    return `<a:r>${rPrXml}<a:t>${safeText}</a:t></a:r>`;
-  });
+  const updatedRuns = runs.map((r) => r.full);
 
-  // Rebuild paragraph: keep everything up to replaceFrom runs, then append new runs.
-  const prefix = runs.slice(0, replaceFrom).map((r) => r.full).join("");
-  const suffix = ""; // replace until end (we only want one editable field)
-  // But we must preserve any content after date inside same paragraph if any; in this template there isn't.
-  // If there is, this would be a future enhancement: detect end of date runs more precisely.
-  const beforeRunsStart = paragraphXml.indexOf(runs[0]?.full ?? "");
-  const afterRunsEnd =
-    runs.length > 0 ? paragraphXml.lastIndexOf(runs[runs.length - 1].full) + runs[runs.length - 1].full.length : 0;
+  for (let i = 0; i < replaceRunIndexes.length; i += 1) {
+    const runIdx = replaceRunIndexes[i];
+    const newText = replacements[i];
 
-  const paragraphHead = paragraphXml.slice(0, beforeRunsStart);
-  const paragraphTail = paragraphXml.slice(afterRunsEnd);
+    // Replace only the inner text of the first <a:t> in this run block.
+    updatedRuns[runIdx] = updatedRuns[runIdx].replace(
+      /(<a:t[^>]*>)([\s\S]*?)(<\/a:t>)/,
+      `$1${newText}$3`
+    );
+  }
 
-  return `${paragraphHead}${prefix}${newRunBlocks.join("")}${suffix}${paragraphTail}`;
+  // Rebuild paragraph by replacing the original concatenated runs with updated ones.
+  // Preserve paragraph wrapper and any other elements (pPr/endParaRPr) by
+  // replacing only the run blocks region.
+  const firstRunIdx = paragraphXml.search(/<a:r\b/);
+  const lastRunEnd = paragraphXml.lastIndexOf("</a:r>");
+  if (firstRunIdx < 0 || lastRunEnd < 0) {
+    throw new Error("Strict template mismatch: could not parse paragraph runs.");
+  }
+
+  const runRegionEnd = lastRunEnd + "</a:r>".length;
+  const head = paragraphXml.slice(0, firstRunIdx);
+  const tail = paragraphXml.slice(runRegionEnd);
+
+  return `${head}${updatedRuns.join("")}${tail}`;
 }
 
 /**
  * PUBLIC_INTERFACE
- * Updates ONLY the date field on slide 1, keeping all other slides and files unchanged.
- *
- * Returns:
- * - updatedPptxBytes: Uint8Array
- * - detected: info about detection method (placeholder vs date-paragraph)
+ * Updates ONLY the date field on slide 1 for the shipped default template,
+ * keeping all other slides/files untouched (including the last slide).
  *
  * @param {ArrayBuffer} pptxArrayBuffer
  * @param {string} dateISO - value from <input type="date">
+ * @returns {Promise<{updatedPptxBytes: Uint8Array, detected: {mode: string, slidePath: string}}>}
  */
 export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const formattedDate = formatDateForTemplate(dateISO);
@@ -183,6 +207,7 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   }
 
   const zip = await JSZip.loadAsync(pptxArrayBuffer);
+
   const slide1File = zip.file(SLIDE1_PATH);
   if (!slide1File) {
     throw new Error(`Template missing expected file: ${SLIDE1_PATH}`);
@@ -190,34 +215,35 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
 
   const slide1Xml = await slide1File.async("string");
 
-  // If template supports explicit placeholder, this is safest and most deterministic.
-  if (slide1Xml.includes(PLACEHOLDER_TOKEN)) {
-    const updatedXml = slide1Xml.replaceAll(PLACEHOLDER_TOKEN, escapeXmlText(formattedDate));
-    zip.file(SLIDE1_PATH, updatedXml);
-    const out = await zip.generateAsync({ type: "uint8array" });
-    return { updatedPptxBytes: out, detected: { mode: "token", token: PLACEHOLDER_TOKEN } };
-  }
-
-  // Fallback: locate the paragraph containing "Date" and rewrite date runs.
   const bounds = findDateParagraphBounds(slide1Xml);
   if (!bounds) {
     throw new Error(
-      'Could not detect date placeholder on slide 1. Add a "{{DATE}}" token in the template or ensure slide 1 contains a "Date" label.'
+      'Strict template mismatch: could not find the Slide 1 "Date" paragraph; refusing to modify.'
     );
   }
 
   const paragraphXml = slide1Xml.slice(bounds.pStart, bounds.pEnd);
-  const updatedParagraphXml = updateDateRunsInParagraph(paragraphXml, formattedDate);
+  const updatedParagraphXml = updateExactTemplateDateRuns(
+    paragraphXml,
+    formattedDate
+  );
 
   const updatedSlide1Xml =
-    slide1Xml.slice(0, bounds.pStart) + updatedParagraphXml + slide1Xml.slice(bounds.pEnd);
+    slide1Xml.slice(0, bounds.pStart) +
+    updatedParagraphXml +
+    slide1Xml.slice(bounds.pEnd);
 
+  // This is the only mutation in the whole PPTX.
   zip.file(SLIDE1_PATH, updatedSlide1Xml);
 
-  // IMPORTANT: all other slides are left untouched in the ZIP,
-  // ensuring the last slide remains exactly as-is.
+  // IMPORTANT: We do not touch any other ZIP entries (slides, rels, media, etc.).
+  // This preserves the last slide and all other content exactly.
   const out = await zip.generateAsync({ type: "uint8array" });
-  return { updatedPptxBytes: out, detected: { mode: "date-paragraph", slidePath: SLIDE1_PATH } };
+
+  return {
+    updatedPptxBytes: out,
+    detected: { mode: "strict-template", slidePath: SLIDE1_PATH },
+  };
 }
 
 /**
@@ -235,8 +261,7 @@ export function downloadPptxBytes(pptxBytes, filename) {
 
 /**
  * PUBLIC_INTERFACE
- * Creates an object URL suitable for embedding an Office Online preview iframe.
- * Note: Some browsers may block local blob URLs in certain iframe contexts.
+ * Creates an object URL suitable for embedding an Office preview iframe.
  * @param {Uint8Array} pptxBytes
  */
 export function createPptxObjectUrl(pptxBytes) {

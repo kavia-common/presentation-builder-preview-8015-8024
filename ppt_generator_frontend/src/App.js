@@ -4,7 +4,6 @@ import {
   createPptxObjectUrl,
   downloadPptxBytes,
   fetchBundledTemplatePptx,
-  readFileAsArrayBuffer,
   todayIsoDate,
   updatePptxDateOnly,
 } from "./pptx/templateEditor";
@@ -13,8 +12,6 @@ import {
 function App() {
   const [theme, setTheme] = useState("light");
 
-  const [templateSource, setTemplateSource] = useState("bundled"); // 'bundled' | 'upload'
-  const [uploadedFileName, setUploadedFileName] = useState("");
   const [templateBytes, setTemplateBytes] = useState(null); // ArrayBuffer
 
   const [dateISO, setDateISO] = useState(todayIsoDate());
@@ -29,36 +26,33 @@ function App() {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  // Load bundled template by default
+  // Load bundled template (Default Template mode)
   useEffect(() => {
     let cancelled = false;
 
     async function loadBundled() {
       try {
-        setStatus({ kind: "loading", message: "Loading bundled PPTX template…" });
+        setStatus({ kind: "loading", message: "Loading Default Template…" });
         const bytes = await fetchBundledTemplatePptx();
         if (cancelled) return;
         setTemplateBytes(bytes);
-        setUploadedFileName("");
-        setStatus({ kind: "ready", message: "Bundled template loaded." });
+        setStatus({ kind: "ready", message: "Default Template loaded." });
       } catch (e) {
         if (cancelled) return;
         setStatus({
           kind: "error",
           message:
-            e instanceof Error ? e.message : "Failed to load bundled template.",
+            e instanceof Error ? e.message : "Failed to load Default Template.",
         });
       }
     }
 
-    if (templateSource === "bundled") {
-      loadBundled();
-    }
+    loadBundled();
 
     return () => {
       cancelled = true;
     };
-  }, [templateSource]);
+  }, []);
 
   // Regenerate PPTX any time date or template changes
   useEffect(() => {
@@ -130,9 +124,9 @@ function App() {
           <div className="brand">
             <div className="brand-mark" aria-hidden="true" />
             <div className="brand-text">
-              <div className="brand-title">PPT Template Date Editor</div>
+              <div className="brand-title">Default Template (Date Only)</div>
               <div className="brand-subtitle">
-                Slide 1 date only • all other content locked (last slide unchanged)
+                Only Slide 1 date is editable • all other content locked • last slide preserved exactly
               </div>
             </div>
           </div>
@@ -150,80 +144,15 @@ function App() {
         <main className="ocean-main">
           <section className="card controls" aria-label="Template controls">
             <div className="card-header">
-              <h2>Template</h2>
+              <h2>Default Template</h2>
               <p>
-                Use the bundled PPTX template or upload a PPTX. Only the date field
-                on slide 1 is editable.
+                The app ships with a built-in PPTX template. All content is locked
+                except the Slide 1 date field, which is updated in-place with the
+                exact original formatting and placement.
               </p>
             </div>
 
             <div className="field-row">
-              <label className="radio">
-                <input
-                  type="radio"
-                  name="templateSource"
-                  value="bundled"
-                  checked={templateSource === "bundled"}
-                  onChange={() => setTemplateSource("bundled")}
-                />
-                <span>
-                  Use bundled template{" "}
-                  <span className="hint">(public/assets/template.pptx)</span>
-                </span>
-              </label>
-
-              <label className="radio">
-                <input
-                  type="radio"
-                  name="templateSource"
-                  value="upload"
-                  checked={templateSource === "upload"}
-                  onChange={() => setTemplateSource("upload")}
-                />
-                <span>Upload template</span>
-              </label>
-            </div>
-
-            <div className="field-row">
-              <div className="field">
-                <label htmlFor="pptxUpload">PPTX file</label>
-                <input
-                  id="pptxUpload"
-                  type="file"
-                  accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                  disabled={templateSource !== "upload"}
-                  onChange={async (e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-
-                    try {
-                      setStatus({ kind: "loading", message: "Reading uploaded PPTX…" });
-                      const bytes = await readFileAsArrayBuffer(file);
-                      setTemplateBytes(bytes);
-                      setUploadedFileName(file.name);
-                      setStatus({ kind: "ready", message: "Uploaded template loaded." });
-                    } catch (err) {
-                      setStatus({
-                        kind: "error",
-                        message:
-                          err instanceof Error ? err.message : "Failed to read upload.",
-                      });
-                    }
-                  }}
-                />
-                <div className="hint">
-                  {templateSource === "upload" ? (
-                    uploadedFileName ? (
-                      <>Loaded: <strong>{uploadedFileName}</strong></>
-                    ) : (
-                      "Select a .pptx file."
-                    )
-                  ) : (
-                    "Using bundled template."
-                  )}
-                </div>
-              </div>
-
               <div className="field">
                 <label htmlFor="dateInput">Slide 1 Date</label>
                 <input
@@ -234,8 +163,9 @@ function App() {
                   onChange={(e) => setDateISO(e.target.value)}
                 />
                 <div className="hint">
-                  This will update only the date text on slide 1. All other slides,
-                  including the last slide, are preserved.
+                  Updates only the exact date text runs on slide 1 (preserving font,
+                  size, color, spacing, and locale format). All other slides/files,
+                  including the last slide, are left untouched.
                 </div>
               </div>
             </div>
@@ -318,9 +248,9 @@ function App() {
 
         <footer className="ocean-footer">
           <div className="footer-note">
-            Locking behavior: The app edits only <code>ppt/slides/slide1.xml</code>.
-            All other files in the PPTX zip are left unchanged, so the last slide
-            remains exactly as-is.
+            Locking behavior: The app edits only the Slide 1 date text runs inside{" "}
+            <code>ppt/slides/slide1.xml</code>. All other files in the PPTX zip are
+            left unchanged, so the last slide remains byte-for-byte identical.
           </div>
         </footer>
       </header>
