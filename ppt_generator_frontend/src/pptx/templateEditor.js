@@ -562,3 +562,28 @@ export async function prunePptxToFirstAndLastSlides(pptxBytes) {
     kept: { firstSlideNumber, lastSlideNumber },
   };
 }
+
+// PUBLIC_INTERFACE
+/**
+ * Returns a plain JavaScript object representing the first slide, with date.
+ */
+export function getFirstSlide(dateStr) {
+  return {
+    type: "first",
+    title: "1st Slide",
+    date: dateStr || (new Date()).toISOString().slice(0, 10),
+    content: `Weekly statistics report for ${dateStr || "..."}`,
+  };
+}
+
+// PUBLIC_INTERFACE
+/**
+ * Returns a plain JavaScript object representing the last slide (fixed "thank you" slide).
+ */
+export function getLastSlide() {
+  return {
+    type: "last",
+    title: "Last Slide",
+    content: "Thank you!",
+  };
+}
