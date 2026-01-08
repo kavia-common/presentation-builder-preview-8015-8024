@@ -23,7 +23,12 @@ function getSidebarSlideNames(slides, factories) {
   return items;
 }
 
-// PUBLIC_INTERFACE
+/**
+ * PUBLIC_INTERFACE
+ * App component for PPT generator builder.
+ * - Conditionally renders the slide preview only when Preview is active in the navbar.
+ * - Keeps the fixed navbar/sidebar/panel behaviors and layout as before.
+ */
 function App() {
   // Initial Slides: just 1st and last
   const [slides, setSlides] = useState([
@@ -38,6 +43,9 @@ function App() {
   const [selectedSidebarIdx, setSelectedSidebarIdx] = useState(0);
   // Export dropdown
   const [exportDropdown, setExportDropdown] = useState(false);
+
+  // Track which navbar option is active: "preview", "skillFactory", "export"
+  const [activeNav, setActiveNav] = useState("preview");
 
   // Add Skill Factory inserts 4 slides before last slide.
   // Each factory is named e.g. Skill Factory 1, Skill Factory 2, ...
@@ -54,6 +62,7 @@ function App() {
       prev[prev.length - 1],
     ]);
     setSelectedSidebarIdx(slides.length - 1); // jump to factory
+    setActiveNav("skillFactory");
   };
 
   // Only allow editing the date of the first slide
@@ -67,13 +76,19 @@ function App() {
     ]);
   };
 
-  // Preview button - scrolls preview to selected slide
+  // Handle Preview button - mark preview active and scroll into view
   const handlePreview = () => {
-    document.getElementById("preview-section").scrollIntoView({ behavior: "smooth" });
+    setActiveNav("preview");
+    setTimeout(() => {
+      // Smooth scroll to preview panel only if it exists
+      const section = document.getElementById("preview-section");
+      if (section) section.scrollIntoView({ behavior: "smooth" });
+    }, 10);
   };
 
   // Export handlers - stub, TODO wire up to pptx/pdf generators
   const handleExport = (format) => {
+    setActiveNav("export");
     if (format === "pptx") {
       // Trigger pptx export (to be implemented by PptxPreview)
       if (window.exportPPTX) window.exportPPTX(slides);
@@ -87,8 +102,12 @@ function App() {
   // Sidebar click: jumps to preview slide (carousel is handled in PptxPreview)
   const handleSidebarSelect = (idx) => {
     setSelectedSidebarIdx(idx);
-    // TODO: could also send a prop or event to PptxPreview for focus
-    handlePreview();
+    // Always set preview active when clicking a slide in sidebar
+    setActiveNav("preview");
+    setTimeout(() => {
+      const section = document.getElementById("preview-section");
+      if (section) section.scrollIntoView({ behavior: "smooth" });
+    }, 10);
   };
 
   // Sidebar names reflect default+factory rules
@@ -100,10 +119,29 @@ function App() {
       <nav className="fixed-navbar">
         <div className="navbar-title">Weekly Statistic Report</div>
         <div className="navbar-actions">
-          <button className="navbar-btn primary" onClick={handlePreview}>Preview</button>
-          <button className="navbar-btn accent" onClick={handleAddFactory}>Add Skill Factory</button>
+          <button
+            className={`navbar-btn primary${activeNav === "preview" ? " selected" : ""}`}
+            onClick={handlePreview}
+            aria-pressed={activeNav === "preview"}
+          >
+            Preview
+          </button>
+          <button
+            className={`navbar-btn accent${activeNav === "skillFactory" ? " selected" : ""}`}
+            onClick={handleAddFactory}
+            aria-pressed={activeNav === "skillFactory"}
+          >
+            Add Skill Factory
+          </button>
           <div className="export-dropdown">
-            <button className="navbar-btn" onClick={() => setExportDropdown((v) => !v)}>
+            <button
+              className={`navbar-btn${activeNav === "export" ? " selected" : ""}`}
+              onClick={() => {
+                setActiveNav("export");
+                setExportDropdown((v) => !v);
+              }}
+              aria-pressed={activeNav === "export" || exportDropdown}
+            >
               Export <span className="dropdown-arrow">▼</span>
             </button>
             {exportDropdown && (
@@ -123,6 +161,9 @@ function App() {
             key={idx}
             className={`sidebar-item${selectedSidebarIdx === idx ? " selected" : ""}`}
             onClick={() => handleSidebarSelect(idx)}
+            tabIndex={0}
+            role="button"
+            aria-current={selectedSidebarIdx === idx ? "page" : undefined}
           >
             {item}
           </div>
@@ -144,14 +185,16 @@ function App() {
           </label>
         </div>
 
-        {/* Preview: receives slides array */}
-        <div id="preview-section" className="preview-block">
-          <PptxPreview
-            slides={slides}
-            selectedIdx={selectedSidebarIdx}
-            setSlideIdx={setSelectedSidebarIdx}
-          />
-        </div>
+        {/* Show slide preview only when Preview option is active in the navbar */}
+        {activeNav === "preview" && (
+          <div id="preview-section" className="preview-block">
+            <PptxPreview
+              slides={slides}
+              selectedIdx={selectedSidebarIdx}
+              setSlideIdx={setSelectedSidebarIdx}
+            />
+          </div>
+        )}
       </main>
     </div>
   );
