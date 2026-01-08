@@ -12,13 +12,15 @@
   left: 0;
   right: 0;
   height: 58px;
-  background: #2563EB;
+  /* Gradient background replaces blue solid */
+  background: linear-gradient(45deg, #af2497 10%, #902d9a 20%, #1840a0 100%);
   color: #fff;
   z-index: 1100;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  box-shadow: 0 2px 12px 0 rgba(37, 99, 235, 0.09);
+  /* Lighter shadow, harmonize with violet/blue */
+  box-shadow: 0 2px 12px 0 rgba(24, 64, 160, 0.13);
   padding: 0 36px;
 }
 .navbar-title {
@@ -38,14 +40,25 @@
   outline: none;
   border-radius: 999px;
   background: #fff;
-  color: #2563EB;
+  color: #1840a0;
   font-weight: 500;
-  box-shadow: 0 1px 4px 0 rgba(37, 99, 235, 0.06);
+  box-shadow: 0 1.5px 6px 0 rgba(175, 36, 151, 0.08);
   cursor: pointer;
   transition: background .16s, color .16s, box-shadow .16s;
+  position: relative;
+  overflow: hidden;
 }
 .navbar-btn.primary {
-  background: #2563EB;
+  /* Gradient background, white text */
+  background: linear-gradient(45deg, #af2497 10%, #902d9a 20%, #1840a0 100%);
+  color: #fff;
+  /* To visually indicate active/highlight */
+  box-shadow: 0 1.5px 6px 0 rgba(175,36,151, 0.12);
+}
+.navbar-btn.primary.selected,
+.navbar-btn.primary:active {
+  /* Slightly deeper blend for active */
+  background: linear-gradient(45deg, #8d207a 5%, #5b288c 35%, #15387e 100%);
   color: #fff;
 }
 .navbar-btn.accent {
@@ -53,12 +66,13 @@
   color: #fff;
 }
 .navbar-btn:hover, .navbar-btn:focus-visible {
-  background: #F3F4F6;
-  color: #111827;
+  background: #f9f4fa;
+  color: #902d9a;
 }
 .navbar-btn.primary:hover,
 .navbar-btn.primary:focus-visible {
-  background: #1d4ed8;
+  /* Stronger violet for hover */
+  background: linear-gradient(45deg, #902d9a 10%, #1840a0 90%);
   color: #fff;
 }
 .navbar-btn.accent:hover,
@@ -99,13 +113,14 @@
   text-align: left;
   font: inherit;
   padding: 10px 16px;
-  color: #2563EB;
+  color: #902d9a;
   cursor: pointer;
-  transition: background 0.14s;
+  transition: background 0.14s, color 0.14s;
 }
-.dropdown-menu button:hover {
-  background: #F9FAFB;
-  color: #111827;
+.dropdown-menu button:hover,
+.dropdown-menu button:focus-visible {
+  background: #f7f4fa;
+  color: #1840a0;
 }
 
 /* Fixed Sidebar */
@@ -132,10 +147,12 @@
   user-select: none;
   transition: background .13s, color .13s, border-left-color .13s;
 }
-.sidebar-item:hover, .sidebar-item.selected {
-  background: linear-gradient(90deg,#2563EB10 60%,#fff 100%);
-  color: #2563EB;
-  border-left: 3px solid #2563EB;
+.sidebar-item:hover,
+.sidebar-item.selected {
+  /* Gradient accent for sidebar highlight and violet text */
+  background: linear-gradient(90deg, #af249725 40%, #902d9a20 80%, #fff 100%);
+  color: #902d9a;
+  border-left: 3px solid #af2497;
 }
 
 /* Main Content area, offset for navbar & sidebar */
@@ -151,7 +168,7 @@
 .panel {
   background: #fff;
   border-radius: 13px;
-  box-shadow: 0 2px 16px 0 #2563EB12;
+  box-shadow: 0 2px 16px 0 #af24971A;
   padding: 26px 34px 20px 34px;
   margin: 20px 0 30px;
   width: 480px;
@@ -160,7 +177,7 @@
 .input-label {
   display: inline-block;
   width: 90px;
-  color: #2563EB;
+  color: #af2497;
   font-weight: 600;
 }
 input[type="date"] {
@@ -174,7 +191,7 @@ input[type="date"] {
   outline: none;
 }
 input[type="date"]:focus {
-  border: 1px solid #2563EB;
+  border: 1px solid #af2497;
 }
 
 /* Preview block */
@@ -183,7 +200,7 @@ input[type="date"]:focus {
   margin-left: 0;
   background: #fff;
   border-radius: 14px;
-  box-shadow: 0 1px 8px 0 #93C5FD19;
+  box-shadow: 0 1px 8px 0 #af249714;
   padding: 30px 19px 44px 19px;
   min-width: 480px;
   max-width: 1120px;
