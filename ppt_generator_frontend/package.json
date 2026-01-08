@@ -17,7 +17,8 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "patch:slide1-label": "python3 src/pptx/patch_slide1_label.py"
   },
   "eslintConfig": {
     "extends": "react-app"
