@@ -313,11 +313,39 @@ export default function PptxPreview({
             ) : !rendered ? (
               <div className="empty-preview">Rendering slide…</div>
             ) : (
-              <img
-                className="slide-image"
-                alt={`Slide ${currentSlideNumber}`}
-                src={rendered.dataUrl}
-              />
+              <>
+                {/* PREVIEW-ONLY FALLBACK: If last slide and fallback image exists, use as underlay */}
+                {currentIdx === slideIndexes.length - 1 ? (
+                  <div
+                    className="slide-image slide-image-fallback-bg"
+                    style={{
+                      position: "relative",
+                      width: rendered?.widthPx || 1040,
+                      height: rendered?.heightPx || 596,
+                      background: `url('/assets/bg_last_slide_fallback.png') center center / cover no-repeat`,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <img
+                      alt={`Slide ${currentSlideNumber}`}
+                      src={rendered.dataUrl}
+                      style={{
+                        position: "relative",
+                        zIndex: 2,
+                        width: "100%",
+                        height: "100%",
+                        background: "transparent"
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <img
+                    className="slide-image"
+                    alt={`Slide ${currentSlideNumber}`}
+                    src={rendered.dataUrl}
+                  />
+                )}
+              </>
             )}
           </div>
         </div>
