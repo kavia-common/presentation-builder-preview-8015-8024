@@ -1,8 +1,9 @@
 import React, { useState } from "react";
 import "./App.css";
-import PptxPreview from "./pptx/PptxPreview";
+import { BrowserRouter as Router, Routes, Route, useNavigate } from "react-router-dom";
 import { generateSkillFactorySlides, skillFactoryName } from "./pptx/skillFactory";
 import { getFirstSlide, getLastSlide } from "./pptx/templateEditor";
+import PreviewPage from "./PreviewPage";
 
 /**
  * Returns the formatted date in YYYY-MM-DD.
@@ -26,7 +27,7 @@ function getSidebarSlideNames(slides, factories) {
 /**
  * PUBLIC_INTERFACE
  * App component for PPT generator builder.
- * - Conditionally renders the slide preview only when Preview is active in the navbar.
+ * - Handles routing for editor (/) and preview carousel (/preview).
  * - Keeps the fixed navbar/sidebar/panel behaviors and layout as before.
  */
 function App() {
@@ -45,158 +46,173 @@ function App() {
   const [exportDropdown, setExportDropdown] = useState(false);
 
   // Track which navbar option is active: "preview", "skillFactory", "export"
+  // This is used for button highlight only (not for routing anymore)
   const [activeNav, setActiveNav] = useState("preview");
 
-  // Add Skill Factory inserts 4 slides before last slide.
-  // Each factory is named e.g. Skill Factory 1, Skill Factory 2, ...
-  const handleAddFactory = () => {
-    const factoryNum = factories.length + 1;
-    const factoryLabel = `${skillFactoryName} ${factoryNum}`;
-    // Generate factory slides
-    const factorySlides = generateSkillFactorySlides(factoryLabel);
-    setFactories([...factories, factoryLabel]);
-    // Insert before the last slide
-    setSlides((prev) => [
-      ...prev.slice(0, prev.length - 1),
-      ...factorySlides,
-      prev[prev.length - 1],
-    ]);
-    setSelectedSidebarIdx(slides.length - 1); // jump to factory
-    setActiveNav("skillFactory");
-  };
+  // React Router navigation hook (inside Router context)
+  function EditorRouter() {
+    const navigate = useNavigate();
 
-  // Only allow editing the date of the first slide
-  const handleFirstSlideDateChange = (e) => {
-    const dateStr = e.target.value;
-    setFirstSlideDate(dateStr);
-    // Regenerate first slide with the edited date
-    setSlides(([first, ...rest]) => [
-      getFirstSlide(dateStr),
-      ...rest,
-    ]);
-  };
+    // Add Skill Factory inserts 4 slides before last slide.
+    // Each factory is named e.g. Skill Factory 1, Skill Factory 2, ...
+    const handleAddFactory = () => {
+      const factoryNum = factories.length + 1;
+      const factoryLabel = `${skillFactoryName} ${factoryNum}`;
+      // Generate factory slides
+      const factorySlides = generateSkillFactorySlides(factoryLabel);
+      setFactories([...factories, factoryLabel]);
+      // Insert before the last slide
+      setSlides((prev) => [
+        ...prev.slice(0, prev.length - 1),
+        ...factorySlides,
+        prev[prev.length - 1],
+      ]);
+      setSelectedSidebarIdx(slides.length - 1); // jump to factory
+      setActiveNav("skillFactory");
+      // IMPORTANT: Remain on the same route (main/editor)
+    };
 
-  // Handle Preview button - mark preview active and scroll into view
-  const handlePreview = () => {
-    setActiveNav("preview");
-    setTimeout(() => {
-      // Smooth scroll to preview panel only if it exists
-      const section = document.getElementById("preview-section");
-      if (section) section.scrollIntoView({ behavior: "smooth" });
-    }, 10);
-  };
+    // Only allow editing the date of the first slide
+    const handleFirstSlideDateChange = (e) => {
+      const dateStr = e.target.value;
+      setFirstSlideDate(dateStr);
+      // Regenerate first slide with the edited date
+      setSlides(([first, ...rest]) => [
+        getFirstSlide(dateStr),
+        ...rest,
+      ]);
+    };
 
-  // Export handlers - stub, TODO wire up to pptx/pdf generators
-  const handleExport = (format) => {
-    setActiveNav("export");
-    if (format === "pptx") {
-      // Trigger pptx export (to be implemented by PptxPreview)
-      if (window.exportPPTX) window.exportPPTX(slides);
-    } else if (format === "pdf") {
-      // Trigger pdf export (to be implemented by PptxPreview)
-      if (window.exportPDF) window.exportPDF(slides);
-    }
-    setExportDropdown(false);
-  };
+    // Handle Preview button - route to /preview
+    const handlePreview = () => {
+      setActiveNav("preview");
+      navigate("/preview");
+    };
 
-  // Sidebar click: jumps to preview slide (carousel is handled in PptxPreview)
-  const handleSidebarSelect = (idx) => {
-    setSelectedSidebarIdx(idx);
-    // Always set preview active when clicking a slide in sidebar
-    setActiveNav("preview");
-    setTimeout(() => {
-      const section = document.getElementById("preview-section");
-      if (section) section.scrollIntoView({ behavior: "smooth" });
-    }, 10);
-  };
+    // Export handlers - stub (TODO wire up to pptx/pdf generators if needed)
+    const handleExport = (format) => {
+      setActiveNav("export");
+      if (format === "pptx") {
+        if (window.exportPPTX) window.exportPPTX(slides);
+      } else if (format === "pdf") {
+        if (window.exportPDF) window.exportPDF(slides);
+      }
+      setExportDropdown(false);
+    };
 
-  // Sidebar names reflect default+factory rules
-  const sidebarItems = getSidebarSlideNames(slides, factories);
+    // Sidebar click: jumps to preview with selected slide shown
+    const handleSidebarSelect = (idx) => {
+      setSelectedSidebarIdx(idx);
+      setActiveNav("preview");
+      navigate("/preview");
+    };
 
-  return (
-    <div className="app-root ocean-pro">
-      {/* Fixed Navbar */}
-      <nav className="fixed-navbar">
-        <div className="navbar-title">Weekly Statistic Report</div>
-        <div className="navbar-actions">
-          <button
-            className={`navbar-btn primary${activeNav === "preview" ? " selected" : ""}`}
-            onClick={handlePreview}
-            aria-pressed={activeNav === "preview"}
-          >
-            Preview
-          </button>
-          <button
-            className={`navbar-btn accent${activeNav === "skillFactory" ? " selected" : ""}`}
-            onClick={handleAddFactory}
-            aria-pressed={activeNav === "skillFactory"}
-          >
-            Add Skill Factory
-          </button>
-          <div className="export-dropdown">
+    // Sidebar names reflect default+factory rules
+    const sidebarItems = getSidebarSlideNames(slides, factories);
+
+    return (
+      <div className="app-root ocean-pro">
+        {/* Fixed Navbar */}
+        <nav className="fixed-navbar">
+          <div className="navbar-title">Weekly Statistic Report</div>
+          <div className="navbar-actions">
             <button
-              className={`navbar-btn${activeNav === "export" ? " selected" : ""}`}
-              onClick={() => {
-                setActiveNav("export");
-                setExportDropdown((v) => !v);
-              }}
-              aria-pressed={activeNav === "export" || exportDropdown}
+              className={`navbar-btn primary${activeNav === "preview" ? " selected" : ""}`}
+              onClick={handlePreview}
+              aria-pressed={activeNav === "preview"}
             >
-              Export <span className="dropdown-arrow">▼</span>
+              Preview
             </button>
-            {exportDropdown && (
-              <div className="dropdown-menu">
-                <button onClick={() => handleExport("pptx")}>Export .pptx</button>
-                <button onClick={() => handleExport("pdf")}>Export .pdf</button>
-              </div>
-            )}
+            <button
+              className={`navbar-btn accent${activeNav === "skillFactory" ? " selected" : ""}`}
+              onClick={handleAddFactory}
+              aria-pressed={activeNav === "skillFactory"}
+            >
+              Add Skill Factory
+            </button>
+            <div className="export-dropdown">
+              <button
+                className={`navbar-btn${activeNav === "export" ? " selected" : ""}`}
+                onClick={() => {
+                  setActiveNav("export");
+                  setExportDropdown((v) => !v);
+                }}
+                aria-pressed={activeNav === "export" || exportDropdown}
+              >
+                Export <span className="dropdown-arrow">▼</span>
+              </button>
+              {exportDropdown && (
+                <div className="dropdown-menu">
+                  <button onClick={() => handleExport("pptx")}>Export .pptx</button>
+                  <button onClick={() => handleExport("pdf")}>Export .pdf</button>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      </nav>
+        </nav>
 
-      {/* Fixed Sidebar */}
-      <aside className="fixed-sidebar">
-        {sidebarItems.map((item, idx) => (
-          <div
-            key={idx}
-            className={`sidebar-item${selectedSidebarIdx === idx ? " selected" : ""}`}
-            onClick={() => handleSidebarSelect(idx)}
-            tabIndex={0}
-            role="button"
-            aria-current={selectedSidebarIdx === idx ? "page" : undefined}
-          >
-            {item}
-          </div>
-        ))}
-      </aside>
+        {/* Fixed Sidebar */}
+        <aside className="fixed-sidebar">
+          {sidebarItems.map((item, idx) => (
+            <div
+              key={idx}
+              className={`sidebar-item${selectedSidebarIdx === idx ? " selected" : ""}`}
+              onClick={() => handleSidebarSelect(idx)}
+              tabIndex={0}
+              role="button"
+              aria-current={selectedSidebarIdx === idx ? "page" : undefined}
+            >
+              {item}
+            </div>
+          ))}
+        </aside>
 
-      {/* Main Content - leave space for navbar/sidebar */}
-      <main className="main-content">
-        {/* Editing panel for first slide date only */}
-        <div className="panel">
-          <h2>Report Configuration</h2>
-          <label>
-            <span className="input-label">Report Date:</span>
-            <input
-              type="date"
-              value={firstSlideDate}
-              onChange={handleFirstSlideDateChange}
-            />
-          </label>
-        </div>
+        {/* Routes for main editor and preview carousel */}
+        <Routes>
+          <Route
+            path="/"
+            element={
+              <main className="main-content">
+                {/* Editing panel for first slide date only */}
+                <div className="panel">
+                  <h2>Report Configuration</h2>
+                  <label>
+                    <span className="input-label">Report Date:</span>
+                    <input
+                      type="date"
+                      value={firstSlideDate}
+                      onChange={handleFirstSlideDateChange}
+                    />
+                  </label>
+                </div>
+              </main>
+            }
+          />
+          <Route
+            path="/preview"
+            element={
+              <PreviewPage
+                slides={slides}
+                selectedSidebarIdx={selectedSidebarIdx}
+                setSelectedSidebarIdx={setSelectedSidebarIdx}
+                onBack={() => {
+                  setActiveNav(""); // clear highlight, will be set when navigating
+                  // Go back to editor page (main)
+                  navigate("/");
+                }}
+              />
+            }
+          />
+        </Routes>
+      </div>
+    );
+  }
 
-        {/* Show slide preview only when Preview option is active in the navbar */}
-        {activeNav === "preview" && (
-          <div id="preview-section" className="preview-block">
-            <PptxPreview
-              slides={slides}
-              selectedIdx={selectedSidebarIdx}
-              setSlideIdx={setSelectedSidebarIdx}
-            />
-          </div>
-        )}
-      </main>
-    </div>
+  // App outer structure: Provides Router context.
+  return (
+    <Router>
+      <EditorRouter />
+    </Router>
   );
 }
 
