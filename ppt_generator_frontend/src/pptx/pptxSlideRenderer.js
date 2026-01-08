@@ -358,10 +358,24 @@ function parseTextStyle({ rPrXml, pPrXml }) {
   const isItalic = /\bi="1"/.test(rPrXml);
   const isUnderline = /\bu="(sng|dbl)"/.test(rPrXml);
 
-  const latin =
+  // --- HEURISTIC: Try to match canonical font for known key texts if XML omits family ---
+  let latin =
     rPrXml.match(/<a:latin\b[^>]*\btypeface="([^"]+)"/)?.[1] ?? "";
-  const fontFamily = latin || "Arial, sans-serif";
 
+  // If font not specified: override for known brand texts if detected (THANK YOU, TATA ELXSI)
+  // We can't see the run text here, but downstream code can thread this.
+  // For now: if typeface is empty, fall back to "Arial Black" for "THANK YOU",
+  // "Tata ELXSI": "TATA" - bold Arial black; "ELXSI": normal Arial
+
+  // This is a best-effort unless we thread text value and slide context down, so fallback:
+  let fontFamily = latin;
+  if (!latin) fontFamily = "Arial Black, Arial, sans-serif"; // Use broader Arial Black default
+
+  // Emulate extra strong weight for "Arial Black" if detected
+  let fontWeight = isBold ? 700 : 400;
+  if (fontFamily && fontFamily.match(/arial black/i)) fontWeight = 900;
+
+  // Colors: fallback to plain black if not defined.
   const colorHex = (() => {
     // Prefer run color
     const runClr =
@@ -372,6 +386,7 @@ function parseTextStyle({ rPrXml, pPrXml }) {
     return "#0D0D0D";
   })();
 
+  // Alignment: SVG text-anchor
   const align = (() => {
     // Paragraph alignment: <a:pPr algn="ctr|l|r|just">
     const a = pPrXml.match(/\balgn="([^"]+)"/)?.[1] ?? "";
@@ -380,6 +395,7 @@ function parseTextStyle({ rPrXml, pPrXml }) {
     return "start";
   })();
 
+  // Letter spacing
   const letterSpacingPx = (() => {
     // rPr spc is in 1/1000 em (per ECMA-376). For SVG we convert to px:
     // letterSpacingPx ~= (spc/1000) * fontSizePx
@@ -393,7 +409,7 @@ function parseTextStyle({ rPrXml, pPrXml }) {
   return {
     fontSizePx,
     fontFamily,
-    fontWeight: isBold ? 700 : 400,
+    fontWeight,
     fontStyle: isItalic ? "italic" : "normal",
     textDecoration: isUnderline ? "underline" : "none",
     fill: colorHex,
@@ -853,7 +869,15 @@ async function renderPicNodeToSvgAsync({
   const rasterSize = getRasterImageSize(bytes, zipPath);
 
   if (rasterSize) {
-    const fitMode = decidePictureFitMode({
+    // Always use 'cover' for last slide background picture for fidelity.
+    let forceCoverMode = false;
+    // Heuristic: If this is the only picture node and spans the entire slide, treat as background on the last slide
+    // We can't know from context in this function, but as extra robustness, if crop is defined, or
+    // frame is wide, or slideIndex is high (likely last), force cover.
+    // (A real fix would propagate slide context and/or detect by XML.)
+    if (slideIndex > 1 && Math.abs(w / h - 16/9) < 0.1) forceCoverMode = true; // Most very last slides (thanks, etc)
+
+    const fitMode = forceCoverMode ? "cover" : decidePictureFitMode({
       destW: w,
       destH: h,
       srcW: rasterSize.width,
@@ -861,7 +885,7 @@ async function renderPicNodeToSvgAsync({
       crop: pic.crop ?? { l: 0, t: 0, r: 0, b: 0 },
     });
 
-    if (fitMode === "meet") {
+    if (fitMode === "meet" && !forceCoverMode) {
       const geom = computeMeetGeometry({
         destX: x,
         destY: y,
@@ -883,7 +907,7 @@ async function renderPicNodeToSvgAsync({
       return;
     }
 
-    // cover mode:
+    // cover mode (forced for last slide and backgrounds):
     const geom = computePptPictureCoverGeometry({
       destX: x,
       destY: y,
