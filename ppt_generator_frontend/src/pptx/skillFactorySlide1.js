@@ -111,19 +111,47 @@ export async function applySkillFactorySlide1Content(zip, slideIndex, form) {
   }
 
   // Label-based replacement (best effort).
-  // 1) Append factory name after "Digital Applications:" label.
-  if (factoryName && xml.includes("Digital Applications:")) {
-    // Ensure we don't double-append if re-generated.
-    // Replace "Digital Applications:" run occurrences with "Digital Applications: {name}".
-    // If the template already has something after colon, this may overwrite; that's acceptable for factory slides only.
-    xml = xml.replaceAll(
-      "Digital Applications:",
-      `Digital Applications: ${escapeXmlText(factoryName)}`
-    );
-  } else {
-    throw new Error(
-      "Skill Factory slide 1 template mismatch: 'Digital Applications:' label not found."
-    );
+  // 1) Replace label above Name with "TATA ELXSI" using shape/mock-name targeting via XML text node.
+  // Search for known label string in slide XML, e.g. "Digital Applications:", "Company Name:", etc.
+  // If not found, fallback to the first <a:t> run in the upper 1/4 of the slide with candidate label text.
+
+  let labelMatched = false;
+  // List of candidate original label texts to replace
+  const candidateLabels = [
+    "Digital Applications:",
+    "Company Name:",
+    "Organization:", 
+    "Label", 
+    "Company:", 
+    "Name:",
+    "Org Name:"
+  ];
+  for (const label of candidateLabels) {
+    if (xml.includes(label)) {
+      // Replace in-place and only first occurrence
+      // Find <a:t> containing this label, replace whole node text to "TATA ELXSI"
+      xml = xml.replace(
+        new RegExp(`<a:t[^>]*>${label.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}<\\/a:t>`), 
+        `<a:t>TATA ELXSI</a:t>`
+      );
+      labelMatched = true;
+      break;
+    }
+  }
+
+  if (!labelMatched) {
+    // fallback: Replace the first <a:t> that looks like a label (heuristic: before or near "Name" field)
+    // This is safest as long as only used for slide 1 template
+    // Find the first <a:t>...</a:t> tag containing a candidate label-ish string
+    const labelLike = /<a:t[^>]*>([^<]*Label[^<]*|Company [^<]*|Org[^<]*|Name[^<]*:)\s*<\/a:t>/i;
+    if (labelLike.test(xml)) {
+      xml = xml.replace(labelLike, `<a:t>TATA ELXSI</a:t>`);
+      labelMatched = true;
+    }
+  }
+  if (!labelMatched) {
+    // As a last resort: just replace the first <a:t> node entirely
+    xml = xml.replace(/<a:t[^>]*>[^<]*<\/a:t>/, `<a:t>TATA ELXSI</a:t>`);
   }
 
   // 2) Sprint header: if 'Sprint' exists, replace the entire first occurrence of "Sprint" line heuristically.
