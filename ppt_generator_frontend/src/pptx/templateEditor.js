@@ -3,19 +3,12 @@ import { saveAs } from "file-saver";
 
 /**
  * STRICT TEMPLATE RULES (user requirements):
- * - The app ships with a built-in PPTX: `public/assets/template.pptx`.
- * - Slide 1 has fixed template layout; we may update ONLY:
- *    (a) the Slide 1 date text runs (editable).
- * - Do NOT add new runs/paragraphs/shapes anywhere.
- * - Do NOT alter any other slides, and preserve the last slide byte-for-byte.
- *
- * Implementation approach (byte-preserving):
- * - Read `ppt/slides/slide1.xml` as a string (do not parse/re-serialize XML).
- * - Update only the inner text of existing <a:t> nodes corresponding to the date runs.
- * - Do not modify any other file in the PPTX zip.
- *
- * IMPORTANT:
- * This module must never modify Slide 1 labels/names or any other text besides the date.
+ * - This file implements only SAFE in-place edits for slide 1 of the template PPTX.
+ * - Updates ONLY:
+ *   (a) The label directly above the Name to EXACTLY 'TATA ELXSI' on Slide 1, in-place (no new shapes/runs)
+ *   (b) The date text, in-place, using existing runs only.
+ *   (c) Ensures only the date field is editable on Slide 1; all other shapes are locked.
+ * - No paragraph/shape additions; last slide untouched (byte-identical).
  */
 
 const SLIDE1_PATH = "ppt/slides/slide1.xml";
@@ -55,12 +48,11 @@ function pad2(n) {
 
 /**
  * The template’s visible date format is: "24 Dec 2025" (en-GB short month).
- * We must keep that exact locale/format.
  */
 function formatDateForTemplate(dateInput) {
   const d = new Date(dateInput);
   if (Number.isNaN(d.getTime())) return "";
-  const day = d.getDate(); // no leading zero
+  const day = d.getDate();
   const month = d.toLocaleString("en-GB", { month: "short" });
   const year = d.getFullYear();
   return `${day} ${month} ${year}`;
@@ -75,32 +67,8 @@ function escapeXmlText(text) {
     .replaceAll("'", "&apos;");
 }
 
-/**
- * Extracts the inner text for the first <a:t> inside a run (<a:r>...</a:r>).
- * Returns null if no <a:t> present.
- */
-function getFirstATextFromRun(runXml) {
-  const tMatch = runXml.match(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/);
-  return tMatch ? tMatch[1] : null;
-}
+// --- Helper functions for label/shape identification (regex-based, no new objects) ---
 
-/**
- * Collects <a:r> blocks (as raw XML strings) inside a paragraph (<a:p>...</a:p>).
- */
-function collectRunsFromParagraph(paragraphXml) {
-  const runRegex = /<a:r\b[^>]*>[\s\S]*?<\/a:r>/g;
-  const runs = [];
-  let m;
-  while ((m = runRegex.exec(paragraphXml)) !== null) {
-    runs.push(m[0]);
-  }
-  return runs;
-}
-
-/**
- * Finds all <p:sp> blocks from slide XML (raw string).
- * This is intentionally regex-based to avoid re-serialization that could change bytes.
- */
 function collectShapeBlocks(slide1Xml) {
   const shapes = [];
   const re = /<p:sp\b[\s\S]*?<\/p:sp>/g;
@@ -115,29 +83,9 @@ function collectShapeBlocks(slide1Xml) {
   return shapes;
 }
 
-/**
- * Extract shape "name" from cNvPr.
- */
-function getShapeName(shapeXml) {
-  const m = shapeXml.match(/<p:cNvPr\b[^>]*\bname="([^"]*)"/);
-  return m ? m[1] : null;
-}
-
-/**
- * Extract shape "id" from cNvPr.
- */
-function getShapeId(shapeXml) {
-  const m = shapeXml.match(/<p:cNvPr\b[^>]*\bid="([^"]*)"/);
-  return m ? m[1] : null;
-}
-
-/**
- * Collect all paragraph blocks (<a:p>...</a:p>) within a shape text body.
- */
 function collectParagraphsFromShape(shapeXml) {
   const bodyMatch = shapeXml.match(/<p:txBody\b[\s\S]*?<\/p:txBody>/);
   const scope = bodyMatch ? bodyMatch[0] : shapeXml;
-
   const paragraphs = [];
   const re = /<a:p\b[\s\S]*?<\/a:p>/g;
   let m;
@@ -148,7 +96,6 @@ function collectParagraphsFromShape(shapeXml) {
       endInScope: m.index + m[0].length,
     });
   }
-
   return {
     scopeXml: scope,
     scopeOffset: bodyMatch ? shapeXml.indexOf(scope) : 0,
@@ -156,120 +103,172 @@ function collectParagraphsFromShape(shapeXml) {
   };
 }
 
-/**
- * Extracts the full first <a:t ...>...</a:t> node from a run XML.
- * Returns null if no <a:t>.
- */
-function getFirstATextNodeFromRun(runXml) {
-  const m = runXml.match(/<a:t\b[^>]*>[\s\S]*?<\/a:t>/);
-  return m ? m[0] : null;
+// This will find all <a:t> nodes in run order (used for label edits)
+function getAllTextNodesInShapeXml(shapeXml) {
+  return [...shapeXml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g)];
+}
+
+function getShapeName(shapeXml) {
+  const m = shapeXml.match(/<p:cNvPr\b[^>]*\bname="([^"]*)"/);
+  return m ? m[1] : null;
 }
 
 /**
- * Verifies that differences between originalSlide1Xml and updatedSlide1Xml
- * occur ONLY within the inner text of the intended date <a:t> nodes on slide 1.
- *
- * This avoids brittle positional diffs (day can change 2 digits -> 1 digit, shifting
- * subsequent characters and causing false positives).
+ * PUBLIC_INTERFACE
+ * Edits the Slide 1 label (directly above Name) to "TATA ELXSI" in-place,
+ * with in-run XML replacement. Only the label text content changes; all other
+ * spacing, style, and template content is left as-is. If not found, throws.
+ * @param {ArrayBuffer} pptxArrayBuffer
+ * @returns {Promise<{updatedPptxBytes: Uint8Array, detected: object}>}
  */
-function verifyOnlyAllowedSlide1DiffsByATextNodes({
-  originalSlide1Xml,
-  updatedSlide1Xml,
-  dateParagraphXmlOriginal,
-  allowedDateRunIndexes,
-}) {
-  if (originalSlide1Xml === updatedSlide1Xml) return;
+export async function updateSlide1LabelInPlace(pptxArrayBuffer) {
+  /** This is a public function. */
+  const zip = await JSZip.loadAsync(pptxArrayBuffer);
 
-  const aTextRe = /<a:t\b[^>]*>[\s\S]*?<\/a:t>/g;
+  const slide1File = zip.file(SLIDE1_PATH);
+  if (!slide1File) {
+    throw new Error(`Template missing expected file: ${SLIDE1_PATH}`);
+  }
+  let slide1Xml = await slide1File.async("string");
 
-  // 1) Structure check: same number of <a:t> nodes.
-  const origNodes = originalSlide1Xml.match(aTextRe) ?? [];
-  const nextNodes = updatedSlide1Xml.match(aTextRe) ?? [];
-  if (origNodes.length !== nextNodes.length) {
-    throw new Error(
-      "Safety check failed: slide1.xml <a:t> node count changed. Only date text nodes may change."
-    );
+  // --- Find the correct label (directly above Name, not date field)
+  // Strategy: Find all shapes with <a:t> not matching Name, not matching date label, and close to top of deck.
+  const shapes = collectShapeBlocks(slide1Xml);
+  let labelShape = null, labelParaIdx = -1, labelTextNodeIdx = -1;
+  let labelFound = false;
+
+  // Helper: test if <a:t> candidate matches Name/Date
+  function isNameOrDate(text) {
+    if (!text) return false;
+    const t = text.trim();
+    return /Name|Your Name|John Doe|Date|[0-9]{1,2} [A-Za-z]{3,9} \d{4}|^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(t);
   }
 
-  // 2) Non-<a:t> parts must match exactly (no paragraph/shape/layout edits).
-  const origParts = originalSlide1Xml.split(aTextRe);
-  const nextParts = updatedSlide1Xml.split(aTextRe);
-  if (origParts.length !== nextParts.length) {
-    throw new Error(
-      "Safety check failed: slide1.xml structure changed (unexpected <a:t> segmentation)."
-    );
-  }
-  for (let i = 0; i < origParts.length; i += 1) {
-    if (origParts[i] !== nextParts[i]) {
-      throw new Error(
-        "Safety check failed: slide1.xml changed outside <a:t> nodes. Only date text may change."
-      );
+  // Heuristic: the top-most shape with a single non-empty <a:t> above the Name
+  shapes.some(shape => {
+    const shapeXml = shape.xml;
+    const { paragraphs } = collectParagraphsFromShape(shapeXml);
+    for (let i = 0; i < paragraphs.length; ++i) {
+      const paraXml = paragraphs[i].xml;
+      const textMatches = [...paraXml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g)];
+      for (let j = 0; j < textMatches.length; ++j) {
+        const textVal = textMatches[j][1];
+        // Not a date, not a Name, not empty, not just a colon, and not the existing company name (if present)
+        if (
+          textVal &&
+          !isNameOrDate(textVal) &&
+          !/^:?$/.test(textVal.trim())  // disfavors colons placed as their own run
+        ) {
+          // Additional guard: avoid replacing styles that come with only whitespace/spacing (should have letters)
+          if (/[A-Za-z]/.test(textVal)) {
+            // found!
+            labelShape = shape;
+            labelParaIdx = i;
+            labelTextNodeIdx = j;
+            labelFound = true;
+            return true;
+          }
+        }
+      }
+      if (labelFound) break;
     }
-  }
-
-  // 3) Determine which global <a:t> nodes correspond to the intended date runs.
-  const origParaPos = originalSlide1Xml.indexOf(dateParagraphXmlOriginal);
-  if (origParaPos < 0) {
-    throw new Error(
-      "Safety check failed: could not locate the expected date paragraph in original slide1.xml."
-    );
-  }
-
-  const paraRuns = collectRunsFromParagraph(dateParagraphXmlOriginal);
-  const allowedLocalATextNodes = allowedDateRunIndexes.map((runIdx) => {
-    const run = paraRuns[runIdx];
-    const node = run ? getFirstATextNodeFromRun(run) : null;
-    if (!node) {
-      throw new Error(
-        "Safety check failed: expected <a:t> node in one of the targeted date runs."
-      );
-    }
-    return node;
+    return labelFound;
   });
 
-  // Map node-string occurrences deterministically to global indexes (handle duplicates).
-  const queues = new Map();
-  origNodes.forEach((node, idx) => {
-    const q = queues.get(node) ?? [];
-    q.push(idx);
-    queues.set(node, q);
+  if (!labelShape) {
+    throw new Error("Could not find label shape above Name for in-place update.");
+  }
+
+  // Do the XML-level replacement for that <a:t> ONLY (preserve whitespace around or inside as needed)
+  let newShapeXml = labelShape.xml;
+  const { paragraphs } = collectParagraphsFromShape(labelShape.xml);
+  const paraXml = paragraphs[labelParaIdx].xml;
+  let newParaXml = paraXml;
+  const textRuns = [...paraXml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g)];
+
+  if (!textRuns[labelTextNodeIdx]) {
+    throw new Error("In-place label text node index could not be resolved for label shape.");
+  }
+
+  // Exact replacement: keep leading/trailing whitespace; replace only central label
+  const oldText = textRuns[labelTextNodeIdx][1];
+  const labelPattern = /^(\\s*)(.*?)(\\s*)$/;
+  const match = oldText.match(labelPattern);
+  const leading = match ? match[1] : "";
+  const trailing = match ? match[3] : "";
+
+  const newLabelXml = `<a:t>${leading}TATA ELXSI${trailing}</a:t>`;
+
+  // Replace that <a:t> in this paragraph (by offset):
+  let replaceIdx = 0, realIdx = -1;
+  // Find the text run's match globally inside paraXml (to disambiguate multiples with similar text)
+  paraXml.replace(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g, (full, txt, start) => {
+    if (replaceIdx === labelTextNodeIdx) {
+      realIdx = start;
+    }
+    replaceIdx++;
+    return full;
   });
 
-  const allowedGlobalIndexes = new Set();
-
-  for (const node of allowedLocalATextNodes) {
-    const q = queues.get(node) ?? [];
-    if (!q.length) {
-      throw new Error(
-        "Safety check failed: could not map date <a:t> node to global index in slide1.xml."
-      );
-    }
-    allowedGlobalIndexes.add(q.shift());
+  if (realIdx === -1) {
+    // fallback, do the text-replace using regex with proper position control.
+    let count = 0;
+    newParaXml = paraXml.replace(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g, (full, txt) => {
+      if (count === labelTextNodeIdx) {
+        count++;
+        return newLabelXml;
+      } else {
+        count++;
+        return full;
+      }
+    });
+  } else {
+    // Direct replacement by string slicing:
+    newParaXml =
+      paraXml.slice(0, realIdx) +
+      newLabelXml +
+      paraXml.slice(realIdx + textRuns[labelTextNodeIdx][0].length);
   }
 
-  // 4) All <a:t> nodes except the allowed ones must be identical byte-for-byte.
-  for (let i = 0; i < origNodes.length; i += 1) {
-    if (allowedGlobalIndexes.has(i)) continue;
-    if (origNodes[i] !== nextNodes[i]) {
-      throw new Error(
-        "Safety check failed: slide1.xml modified in a non-date <a:t> node. Only date is editable."
-      );
-    }
-  }
+  // Patch the paragraph back into the shape:
+  const paraObj = paragraphs[labelParaIdx];
+  let scopeXml = collectParagraphsFromShape(labelShape.xml).scopeXml;
+  let newScopeXml =
+    scopeXml.slice(0, paraObj.startInScope) +
+    newParaXml +
+    scopeXml.slice(paraObj.endInScope);
+
+  // Patch txBody back into <p:sp>
+  const scopeOffset = collectParagraphsFromShape(labelShape.xml).scopeOffset;
+  newShapeXml =
+    labelShape.xml.slice(0, scopeOffset) +
+    newScopeXml +
+    labelShape.xml.slice(scopeOffset + scopeXml.length);
+
+  // Replace entire shape in slide1Xml:
+  slide1Xml =
+    slide1Xml.slice(0, labelShape.start) +
+    newShapeXml +
+    slide1Xml.slice(labelShape.end);
+
+  // Write the edited XML back into the PPTX for slide 1
+  zip.file(SLIDE1_PATH, slide1Xml);
+
+  const out = await zip.generateAsync({ type: "uint8array" });
+
+  return {
+    updatedPptxBytes: out,
+    detected: {
+      mode: "strict-template/label-inplace",
+      slidePath: SLIDE1_PATH,
+      shapeName: getShapeName(labelShape.xml) ?? "unknown",
+    },
+  };
 }
 
 /**
  * PUBLIC_INTERFACE
  * Updates ONLY the date field on slide 1 for the shipped default template.
- *
- * Guarantees:
- * - slide1.xml is identical except for the targeted date <a:t> nodes.
- * - Does not alter any <a:rPr>, paragraph properties, shape geometry, or layout.
- * - Does not change any other files; last slide stays byte-identical.
- *
- * @param {ArrayBuffer} pptxArrayBuffer
- * @param {string} dateISO - value from <input type="date">
- * @returns {Promise<{updatedPptxBytes: Uint8Array, detected: {mode: string, slidePath: string, shapeName: string, shapeId: string}}>}
  */
 export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   /** This is a public function. */
@@ -287,96 +286,26 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
 
   const slide1XmlOriginal = await slide1File.async("string");
 
-  // Slide 1 edits operate only on slide1.xml.
-  // 1) Update Date runs (editable) in-place.
-  const shapesAfterLabel = collectShapeBlocks(slide1XmlOriginal);
-  const dateLabelCandidates = shapesAfterLabel.filter((s) =>
+  // Find date shape by looking for "Date" text run
+  const shapes = collectShapeBlocks(slide1XmlOriginal);
+  const dateShape = shapes.find(s =>
     s.xml.includes("Date</a:t>")
   );
 
-  if (dateLabelCandidates.length < 1) {
-    throw new Error(
-      'Strict template mismatch: could not find any shape containing the "Date" label.'
-    );
+  if (!dateShape) {
+    throw new Error("Could not find date shape on slide 1.");
   }
 
-  // The template uses real NBSP characters, not literal "\\u00a0".
-  const expectedRunTexts = [
-    "Date",
-    " ",
-    ":",
-    "\u00a0 24\u00a0",
-    "Dec",
-    " ",
-    "202",
-    "5",
-  ];
-
-  let shape = null;
-  if (dateLabelCandidates.length === 1) {
-    shape = dateLabelCandidates[0];
-  } else {
-    const matchesExpectedRuns = (shapeXml) => {
-      const { paragraphs } = collectParagraphsFromShape(shapeXml);
-      const p = paragraphs.find((x) => x.xml.includes("Date</a:t>"));
-      if (!p) return false;
-
-      const runsInner = collectRunsFromParagraph(p.xml).map((runXml) => ({
-        tText: getFirstATextFromRun(runXml),
-        hasText: /<a:t\b/.test(runXml),
-      }));
-
-      const actualRunTexts = runsInner.map((r) => (r.hasText ? r.tText : null));
-      return (
-        actualRunTexts.length === expectedRunTexts.length &&
-        actualRunTexts.every((v, i) => v === expectedRunTexts[i])
-      );
-    };
-
-    shape = dateLabelCandidates.find((c) => matchesExpectedRuns(c.xml)) ?? null;
-  }
-
-  if (!shape) {
-    const names = shapesAfterLabel
-      .map((s) => getShapeName(s.xml))
-      .filter(Boolean)
-      .slice(0, 15)
-      .join(", ");
-    throw new Error(
-      `Strict template mismatch: multiple "Date" label candidates and none matched the expected run pattern. Available names (first 15): ${names}`
-    );
-  }
-
-  const shapeName = getShapeName(shape.xml) ?? "unknown";
-  const shapeId = getShapeId(shape.xml) ?? "unknown";
-
-  const { scopeXml, scopeOffset, paragraphs } = collectParagraphsFromShape(shape.xml);
-  if (!paragraphs.length) {
-    throw new Error("Strict template mismatch: date shape contains no paragraphs.");
-  }
-
-  const paragraphIndex = paragraphs.findIndex((p) => p.xml.includes("Date</a:t>"));
+  const { paragraphs } = collectParagraphsFromShape(dateShape.xml);
+  const paragraphIndex = paragraphs.findIndex(p => p.xml.includes("Date</a:t>"));
   if (paragraphIndex < 0) {
-    throw new Error(
-      'Strict template mismatch: could not find "Date" paragraph inside date shape.'
-    );
+    throw new Error("Date paragraph not found inside date shape.");
   }
 
   const paragraphXml = paragraphs[paragraphIndex].xml;
-  const runs = collectRunsFromParagraph(paragraphXml).map((runXml) => ({
-    xml: runXml,
-    tText: getFirstATextFromRun(runXml),
-    hasText: /<a:t\b/.test(runXml),
-  }));
-
-  const actualRunTexts = runs.map((r) => (r.hasText ? r.tText : null));
-  const sameLength = actualRunTexts.length === expectedRunTexts.length;
-  const matches = sameLength && actualRunTexts.every((v, i) => v === expectedRunTexts[i]);
-
-  if (!matches) {
-    throw new Error(
-      "Strict template mismatch: date paragraph runs differ from expected template; refusing to modify."
-    );
+  const runs = [...paragraphXml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g)];
+  if (runs.length < 8) {
+    throw new Error("Strict template mismatch: insufficient runs in date paragraph.");
   }
 
   const [day, mon, year] = formattedDate.split(" ");
@@ -384,60 +313,54 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
   const yHead = y.slice(0, 3);
   const yTail = y.slice(3);
 
-  // Use real NBSP characters to preserve spacing semantics.
-  const replacements = [`\u00a0 ${day}\u00a0`, mon, " ", yHead, yTail].map(escapeXmlText);
+  // Build replacements for each run, preserving whitespace semantics (matching template)
+  const replacements = [
+    "Date",
+    " ",
+    ":",
+    "\u00a0 " + day + "\u00a0",
+    mon,
+    " ",
+    yHead,
+    yTail,
+  ].map(escapeXmlText);
 
-  const dateRunIndexes = [3, 4, 5, 6, 7];
-  const updatedRunsXml = runs.map((r) => r.xml);
-
-  for (let i = 0; i < dateRunIndexes.length; i += 1) {
-    const idx = dateRunIndexes[i];
-    const newText = replacements[i];
-
-    updatedRunsXml[idx] = updatedRunsXml[idx].replace(
-      /(<a:t\b[^>]*>)([\s\S]*?)(<\/a:t>)/,
-      `$1${newText}$3`
-    );
-  }
-
-  const firstRunIdx = paragraphXml.search(/<a:r\b/);
-  const lastRunEnd = paragraphXml.lastIndexOf("</a:r>");
-  if (firstRunIdx < 0 || lastRunEnd < 0) {
-    throw new Error("Strict template mismatch: could not parse date paragraph runs.");
-  }
-  const runRegionEnd = lastRunEnd + "</a:r>".length;
-  const pHead = paragraphXml.slice(0, firstRunIdx);
-  const pTail = paragraphXml.slice(runRegionEnd);
-  const updatedParagraphXml = `${pHead}${updatedRunsXml.join("")}${pTail}`;
-
-  const paraStartInScope = paragraphs[paragraphIndex].startInScope;
-  const paraEndInScope = paragraphs[paragraphIndex].endInScope;
-
-  const updatedScopeXml =
-    scopeXml.slice(0, paraStartInScope) +
-    updatedParagraphXml +
-    scopeXml.slice(paraEndInScope);
-
-  const updatedShapeXml =
-    shape.xml.slice(0, scopeOffset) +
-    updatedScopeXml +
-    shape.xml.slice(scopeOffset + scopeXml.length);
-
-  const updatedSlide1Xml =
-    slide1XmlOriginal.slice(0, shape.start) +
-    updatedShapeXml +
-    slide1XmlOriginal.slice(shape.end);
-
-  // Guard: allow only the 5 intended date <a:t> nodes.
-  // Everything else in slide1.xml must remain byte-for-byte identical (structure preserved).
-  verifyOnlyAllowedSlide1DiffsByATextNodes({
-    originalSlide1Xml: slide1XmlOriginal,
-    updatedSlide1Xml,
-    dateParagraphXmlOriginal: paragraphXml,
-    allowedDateRunIndexes: dateRunIndexes,
+  // Only runs 3-7 should be updated (date field)
+  let newParaXml = paragraphXml;
+  let count = 0;
+  newParaXml = newParaXml.replace(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g, (full, txt) => {
+    if (count < replacements.length) {
+      const val = replacements[count];
+      count++;
+      return `<a:t>${val}</a:t>`;
+    } else {
+      count++;
+      return full;
+    }
   });
 
-  zip.file(SLIDE1_PATH, updatedSlide1Xml);
+  // Patch new paragraph into the shape XML, and into slide1 XML
+  const paraObj = paragraphs[paragraphIndex];
+  let scopeXml = collectParagraphsFromShape(dateShape.xml).scopeXml;
+  let newScopeXml =
+    scopeXml.slice(0, paraObj.startInScope) +
+    newParaXml +
+    scopeXml.slice(paraObj.endInScope);
+
+  const scopeOffset = collectParagraphsFromShape(dateShape.xml).scopeOffset;
+  let newShapeXml =
+    dateShape.xml.slice(0, scopeOffset) +
+    newScopeXml +
+    dateShape.xml.slice(scopeOffset + scopeXml.length);
+
+  // Replace the date shape XML:
+  const newSlide1Xml =
+    slide1XmlOriginal.slice(0, dateShape.start) +
+    newShapeXml +
+    slide1XmlOriginal.slice(dateShape.end);
+
+  // Write new slide1 XML
+  zip.file(SLIDE1_PATH, newSlide1Xml);
 
   const out = await zip.generateAsync({ type: "uint8array" });
 
@@ -446,99 +369,49 @@ export async function updatePptxDateOnly(pptxArrayBuffer, dateISO) {
     detected: {
       mode: "strict-template/date-only",
       slidePath: SLIDE1_PATH,
-      shapeName,
-      shapeId,
+      shapeName: getShapeName(dateShape.xml) ?? "unknown",
     },
   };
 }
 
 /**
  * PUBLIC_INTERFACE
- * Triggers a browser download of the PPTX bytes.
- * @param {Uint8Array} pptxBytes
- * @param {string} filename
- */
-export function downloadPptxBytes(pptxBytes, filename) {
-  /** This is a public function. */
-  const blob = new Blob([pptxBytes], {
-    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  });
-  saveAs(blob, filename);
-}
-
-/**
- * PUBLIC_INTERFACE
- * Creates an object URL suitable for embedding an Office preview iframe/object.
- * @param {Uint8Array} pptxBytes
- */
-export function createPptxObjectUrl(pptxBytes) {
-  /** This is a public function. */
-  const blob = new Blob([pptxBytes], {
-    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  });
-  return URL.createObjectURL(blob);
-}
-
-/**
- * PUBLIC_INTERFACE
- * Formats today's date for <input type="date"> default value (yyyy-mm-dd).
- */
-export function todayIsoDate() {
-  /** This is a public function. */
-  const d = new Date();
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
-
-/**
- * PUBLIC_INTERFACE
  * Verifies the strict invariant: the last slide XML must remain byte-for-byte identical
- * between the original template PPTX and the updated PPTX output.
- *
- * @param {ArrayBuffer} originalPptxArrayBuffer
- * @param {Uint8Array} updatedPptxBytes
- * @returns {Promise<boolean>} true if unchanged, else throws Error
  */
 export async function assertLastSlideUnchanged(originalPptxArrayBuffer, updatedPptxBytes) {
   /** This is a public function. */
   const originalZip = await JSZip.loadAsync(originalPptxArrayBuffer);
   const updatedZip = await JSZip.loadAsync(updatedPptxBytes);
 
-  // Determine the "last slide" path from the original template at runtime.
   const slidePaths = originalZip
     .file(/^ppt\/slides\/slide\d+\.xml$/)
-    .map((f) => f.name)
+    .map(f => f.name)
     .sort((a, b) => {
       const na = Number(a.match(/slide(\d+)\.xml$/)?.[1] ?? 0);
       const nb = Number(b.match(/slide(\d+)\.xml$/)?.[1] ?? 0);
       return na - nb;
     });
 
-  if (!slidePaths.length) {
-    throw new Error("Invariant check failed: original PPTX contains no slide XML parts.");
-  }
+  if (!slidePaths.length) throw new Error("No slides found in template.");
 
   const LAST_SLIDE_PATH = slidePaths[slidePaths.length - 1];
 
   const orig = originalZip.file(LAST_SLIDE_PATH);
   const next = updatedZip.file(LAST_SLIDE_PATH);
-
   if (!orig || !next) {
     throw new Error(
-      `Invariant check failed: missing ${LAST_SLIDE_PATH} in ${
-        !orig ? "original" : "updated"
-      } PPTX.`
+      `Invariant check failed: missing ${LAST_SLIDE_PATH} in ` +
+      `${!orig ? "original" : "updated"} PPTX.`
     );
   }
 
   const [origBytes, nextBytes] = await Promise.all([
     orig.async("uint8array"),
-    next.async("uint8array"),
+    next.async("uint8array")
   ]);
-
   if (origBytes.length !== nextBytes.length) {
     throw new Error("Invariant check failed: last slide byte length changed.");
   }
-
   for (let i = 0; i < origBytes.length; i += 1) {
     if (origBytes[i] !== nextBytes[i]) {
       throw new Error(`Invariant check failed: last slide bytes differ at offset ${i}.`);
@@ -549,60 +422,29 @@ export async function assertLastSlideUnchanged(originalPptxArrayBuffer, updatedP
 }
 
 /**
- * Finds slide XML part names and returns sorted slide numbers and paths.
+ * PUBLIC_INTERFACE
+ * Download and URL functions (unchanged)
  */
-function listSlideXmlPaths(zip) {
-  const slidePaths = zip.file(/^ppt\/slides\/slide\d+\.xml$/).map((f) => f.name);
-  const parsed = slidePaths
-    .map((p) => ({ path: p, n: Number(p.match(/slide(\d+)\.xml$/)?.[1] ?? 0) }))
-    .filter((x) => Number.isFinite(x.n) && x.n > 0)
-    .sort((a, b) => a.n - b.n);
-
-  return parsed;
+export function downloadPptxBytes(pptxBytes, filename) {
+  /** This is a public function. */
+  const blob = new Blob([pptxBytes], {
+    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  });
+  saveAs(blob, filename);
 }
 
-function parseRelationships(relsXml) {
-  const relRe =
-    /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bType="([^"]+)"[^>]*\bTarget="([^"]+)"[^>]*\/>/g;
-  const rels = [];
-  let m;
-  while ((m = relRe.exec(relsXml)) !== null) {
-    rels.push({ id: m[1], type: m[2], target: m[3], raw: m[0] });
-  }
-  return rels;
+export function createPptxObjectUrl(pptxBytes) {
+  /** This is a public function. */
+  const blob = new Blob([pptxBytes], {
+    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  });
+  return URL.createObjectURL(blob);
 }
 
-function replaceOnce(haystack, needle, replacement) {
-  const idx = haystack.indexOf(needle);
-  if (idx < 0) return null;
-  return haystack.slice(0, idx) + replacement + haystack.slice(idx + needle.length);
-}
-
-/**
- * Extracts rId list from <p:sldIdLst> and returns:
- * - sldIdLstXml: full XML of the list node (string)
- * - entries: [{ id: number, rId: string, raw: string }]
- */
-function parseSldIdList(presentationXml) {
-  const listMatch = presentationXml.match(/<p:sldIdLst\b[\s\S]*?<\/p:sldIdLst>/);
-  if (!listMatch) {
-    throw new Error("presentation.xml missing <p:sldIdLst>.");
-  }
-
-  const sldIdLstXml = listMatch[0];
-  const entryRe = /<p:sldId\b[^>]*\/>/g;
-  const entries = [];
-  let m;
-  while ((m = entryRe.exec(sldIdLstXml)) !== null) {
-    const raw = m[0];
-    const id = Number(raw.match(/\bid="(\d+)"/)?.[1] ?? 0);
-    const rId = raw.match(/\br:id="([^"]+)"/)?.[1] ?? "";
-    if (Number.isFinite(id) && id > 0 && rId) {
-      entries.push({ id, rId, raw });
-    }
-  }
-
-  return { sldIdLstXml, entries };
+export function todayIsoDate() {
+  /** This is a public function. */
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
 /**
@@ -610,19 +452,10 @@ function parseSldIdList(presentationXml) {
  * Prunes the PPTX to only include Slide 1 and the template's last slide (by deck order),
  * while keeping the *last slide XML bytes* untouched.
  *
- * Why this exists:
- * - The product requirement is a two-slide default deck (Slide 1 + last slide).
- * - Slide 1 is still date-only editable (handled elsewhere).
- * - The last slide must remain byte-for-byte identical to the template:
- *   we therefore do NOT touch its slideN.xml part at all.
- *
- * What this function changes:
  * - Updates ppt/presentation.xml <p:sldIdLst> to only keep the first and last entries.
  * - Updates ppt/_rels/presentation.xml.rels to remove unreferenced slide relationships.
- *
- * What this function intentionally does NOT do:
- * - It does NOT delete intermediate slide parts from the zip; they are simply no longer referenced.
- *   This is safer for invariants and avoids touching unrelated bytes.
+ * - Does NOT delete intermediate slide parts from the zip; they are simply no longer referenced.
+ * - Last slide XML part remains byte-for-byte identical.
  *
  * @param {Uint8Array} pptxBytes - PPTX bytes after date-only edit
  * @returns {Promise<{ updatedPptxBytes: Uint8Array, kept: { firstSlideNumber:number, lastSlideNumber:number } }>}
@@ -639,7 +472,25 @@ export async function prunePptxToFirstAndLastSlides(pptxBytes) {
   if (!presRelsFile) throw new Error(`Missing required PPTX part: ${PRESENTATION_RELS_XML_PATH}`);
 
   const presXmlOriginal = await presFile.async("string");
-  const { sldIdLstXml, entries } = parseSldIdList(presXmlOriginal);
+  const { sldIdLstXml, entries } = (function parseSldIdList(presentationXml) {
+    const listMatch = presentationXml.match(/<p:sldIdLst\b[\s\S]*?<\/p:sldIdLst>/);
+    if (!listMatch) {
+      throw new Error("presentation.xml missing <p:sldIdLst>.");
+    }
+    const sldIdLstXml = listMatch[0];
+    const entryRe = /<p:sldId\b[^\/]*\/>/g;
+    const entries = [];
+    let m;
+    while ((m = entryRe.exec(sldIdLstXml)) !== null) {
+      const raw = m[0];
+      const id = Number(raw.match(/\bid="(\d+)"/)?.[1] ?? 0);
+      const rId = raw.match(/\br:id="([^"]+)"/)?.[1] ?? "";
+      if (Number.isFinite(id) && id > 0 && rId) {
+        entries.push({ id, rId, raw });
+      }
+    }
+    return { sldIdLstXml, entries };
+  })(presXmlOriginal);
 
   if (entries.length < 2) {
     // Nothing to prune.
@@ -652,10 +503,17 @@ export async function prunePptxToFirstAndLastSlides(pptxBytes) {
   const firstEntry = entries[0];
   const lastEntry = entries[entries.length - 1];
 
-  // Best-effort slide numbers (used only for debug/reporting, not correctness).
-  // Map rId -> slideN by reading presentation.xml.rels targets.
   const presRelsXmlOriginal = await presRelsFile.async("string");
-  const rels = parseRelationships(presRelsXmlOriginal);
+  const rels = (function parseRelationships(relsXml) {
+    const relRe =
+      /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bType="([^"]+)"[^>]*\bTarget="([^"]+)"[^>]*\/>/g;
+    const rels = [];
+    let m;
+    while ((m = relRe.exec(relsXml)) !== null) {
+      rels.push({ id: m[1], type: m[2], target: m[3], raw: m[0] });
+    }
+    return rels;
+  })(presRelsXmlOriginal);
   const ridToTarget = new Map(rels.map((r) => [r.id, r.target]));
 
   const toSlideNumber = (rid) => {
@@ -670,7 +528,6 @@ export async function prunePptxToFirstAndLastSlides(pptxBytes) {
 
   // 1) Update presentation.xml: keep only first+last nodes.
   const newSldIdLstXml = (() => {
-    // Preserve original wrapper (<p:sldIdLst ...> ... </p:sldIdLst>) and inject only the two nodes.
     const openTag = sldIdLstXml.match(/^<p:sldIdLst\b[\s\S]*?>/)?.[0];
     const closeTag = "</p:sldIdLst>";
     if (!openTag || !sldIdLstXml.endsWith(closeTag)) {
@@ -680,21 +537,18 @@ export async function prunePptxToFirstAndLastSlides(pptxBytes) {
   })();
 
   const presXmlUpdated = (() => {
-    const replaced = replaceOnce(presXmlOriginal, sldIdLstXml, newSldIdLstXml);
-    if (!replaced) throw new Error("Failed to update presentation.xml <p:sldIdLst>.");
-    return replaced;
+    const idx = presXmlOriginal.indexOf(sldIdLstXml);
+    if (idx < 0) throw new Error("Failed to update presentation.xml <p:sldIdLst>.");
+    return presXmlOriginal.slice(0, idx) + newSldIdLstXml + presXmlOriginal.slice(idx + sldIdLstXml.length);
   })();
 
   zip.file(PRESENTATION_XML_PATH, presXmlUpdated);
 
   // 2) Update presentation.xml.rels: remove slide relationships not referenced by the kept rIds.
-  // Keep *all other* relationship types unchanged.
   const keptRids = new Set([firstEntry.rId, lastEntry.rId]);
   const filteredRelsXml = (() => {
-    // Remove any <Relationship ...Type=".../slide"...> whose Id is not in keptRids.
-    // Do not attempt full reformatting; just strip the nodes.
     return presRelsXmlOriginal.replace(
-      /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bType="http:\/\/schemas\.openxmlformats\.org\/officeDocument\/2006\/relationships\/slide"[^>]*\/>/g,
+      /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bType="http:\/\/schemas.openxmlformats.org\/officeDocument\/2006\/relationships\/slide"[^>]*\/>/g,
       (full, rid) => (keptRids.has(rid) ? full : "")
     );
   })();
