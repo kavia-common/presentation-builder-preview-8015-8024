@@ -100,15 +100,54 @@ function App() {
       setExportDropdown(false);
     };
 
-    // Sidebar click: jumps to preview with selected slide shown
+    // Sidebar click behavior based on sidebar item.
     const handleSidebarSelect = (idx) => {
       setSelectedSidebarIdx(idx);
-      setActiveNav("preview");
-      navigate("/preview");
+
+      // Sidebar items: ["1st Slide", factory1..., ..., "Last Slide"]
+      if (idx === 0) {
+        // 1st Slide: Stay on "/" (editor)
+        navigate("/");
+      } else if (idx === sidebarItems.length - 1) {
+        // Last Slide: Go to new view-only route /last
+        navigate("/last");
+      } else {
+        // Factory slide: select in list, stay on "/" (could expand with more editing in future)
+        navigate("/");
+      }
     };
 
     // Sidebar names reflect default+factory rules
     const sidebarItems = getSidebarSlideNames(slides, factories);
+
+    // Last slide view-only page
+    function LastSlideView() {
+      // Get slide object for last slide (safe fallback)
+      const lastSlide = slides.length >= 2 ? slides[slides.length - 1] : { title: "Last Slide", content: "Thank you!" };
+      return (
+        <main className="main-content">
+          <div className="panel" style={{ pointerEvents: "none", opacity: 0.95 }}>
+            <h2>{lastSlide.title}</h2>
+            <pre style={{
+              color: "#1a1a1a",
+              fontSize: "1.13em",
+              background: "#F3F6FC",
+              borderRadius: "9px",
+              padding: "20px 14px",
+              minHeight: "90px",
+              userSelect: "text",
+            }}>
+              {lastSlide.content}
+            </pre>
+            <div aria-label="This page is view-only for the final slide." style={{
+              marginTop: 14, color: "#818cf8", fontWeight: 500, fontSize: "0.98em"
+            }}>
+              View-only. <span style={{color:"#E87A41"}}>No edits allowed.</span>
+            </div>
+          </div>
+        </main>
+      );
+    }
 
     return (
       <div className="app-root ocean-pro">
@@ -167,7 +206,7 @@ function App() {
           ))}
         </aside>
 
-        {/* Routes for main editor and preview carousel */}
+        {/* Routes for main editor, preview carousel, and last slide view */}
         <Routes>
           <Route
             path="/"
@@ -186,6 +225,12 @@ function App() {
                   </label>
                 </div>
               </main>
+            }
+          />
+          <Route
+            path="/last"
+            element={
+              <LastSlideView />
             }
           />
           <Route
